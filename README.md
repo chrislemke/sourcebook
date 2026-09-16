@@ -1,10 +1,13 @@
 # Sourcebook
 
+[![Quality](https://github.com/chrislemke/sourcebook/actions/workflows/quality.yml/badge.svg)](https://github.com/chrislemke/sourcebook/actions/workflows/quality.yml)
+[![Validate packages](https://github.com/chrislemke/sourcebook/actions/workflows/package-proof.yml/badge.svg)](https://github.com/chrislemke/sourcebook/actions/workflows/package-proof.yml)
+
 Sourcebook adds read-only German federal and EU research tools to Claude and Codex. It can search public-source metadata, return compact records, and keep links and source dates attached to the result.
 
 You do not need to run a server yourself. After installation, the desktop app or command-line client starts Sourcebook when it needs it.
 
-> The product names used below are **Claude Code** and **Codex CLI**. These are sometimes mistyped as “Cloud Code” and “Codec CLI.”
+> The product names used below are **Claude Code** and **Codex CLI**. These are sometimes mistyped as "Cloud Code" and "Codec CLI."
 
 ## What works immediately
 
@@ -25,6 +28,17 @@ The package builder currently targets:
 Intel Macs and Linux are not packaged yet. Developers can still run the Python project directly with Python 3.12.
 
 The packages built from this checkout are development artifacts. The macOS binary is ad-hoc signed rather than notarized, and the Windows binary is not Authenticode-signed. Gatekeeper or SmartScreen may therefore block it. A normal public release still needs platform signing and an interactive installation check in each desktop app.
+
+## Download from GitHub
+
+Open the [latest GitHub release](https://github.com/chrislemke/sourcebook/releases/latest) and download the file for your computer:
+
+- `sourcebook-darwin-arm64.tar.gz` for an Apple Silicon Mac
+- `sourcebook-windows-x64.zip` for a 64-bit Windows computer
+
+Extract the file into a folder named `sourcebook`. It contains the standalone program, all three Claude Desktop extensions, and the Claude Code and OpenAI plugin marketplaces. The release also includes `SHA256SUMS` if you want to verify the downloads.
+
+These downloads currently have the unsigned-development-package limitation described above. You may need to approve the program in your operating system's security settings.
 
 ## Prepare the package
 
@@ -51,20 +65,24 @@ uv run policy-mcp package --binary dist/policy-mcp.exe --output dist/packages --
 
 The `dist/packages` folder now contains the client packages and a standalone executable in `dist/packages/bin`.
 
-For the commands below, set these paths once. On macOS:
+For the commands below, set the package folder once. Use the first `PACKAGE_DIR` line for a repository build or the second for an extracted GitHub download. On macOS:
 
 ```bash
-SOURCEBOOK="$PWD/dist/packages/bin/policy-mcp"
-CLAUDE_MARKETPLACE="$PWD/dist/packages/marketplaces/claude"
-OPENAI_MARKETPLACE="$PWD/dist/packages/marketplaces/openai"
+PACKAGE_DIR="$PWD/dist/packages"
+# PACKAGE_DIR="$PWD/sourcebook"
+SOURCEBOOK="$PACKAGE_DIR/bin/policy-mcp"
+CLAUDE_MARKETPLACE="$PACKAGE_DIR/marketplaces/claude"
+OPENAI_MARKETPLACE="$PACKAGE_DIR/marketplaces/openai"
 ```
 
 On Windows PowerShell:
 
 ```powershell
-$Sourcebook = (Resolve-Path ".\dist\packages\bin\policy-mcp.exe").Path
-$ClaudeMarketplace = (Resolve-Path ".\dist\packages\marketplaces\claude").Path
-$OpenAIMarketplace = (Resolve-Path ".\dist\packages\marketplaces\openai").Path
+$PackageDir = (Resolve-Path ".\dist\packages").Path
+# $PackageDir = (Resolve-Path ".\sourcebook").Path
+$Sourcebook = (Resolve-Path "$PackageDir\bin\policy-mcp.exe").Path
+$ClaudeMarketplace = (Resolve-Path "$PackageDir\marketplaces\claude").Path
+$OpenAIMarketplace = (Resolve-Path "$PackageDir\marketplaces\openai").Path
 ```
 
 ## Claude Desktop
@@ -98,7 +116,7 @@ claude plugin marketplace add "$ClaudeMarketplace" --scope user
 claude plugin install policy-research@policy-tools --scope user
 ```
 
-Start Claude Code again. Run `/plugin`, open **Installed**, and confirm that `policy-research` is enabled. Claude Code’s [plugin guide](https://code.claude.com/docs/en/discover-plugins) explains the same marketplace process.
+Start Claude Code again. Run `/plugin`, open **Installed**, and confirm that `policy-research` is enabled. Claude Code's [plugin guide](https://code.claude.com/docs/en/discover-plugins) explains the same marketplace process.
 
 If plugin installation is unavailable, direct registration is the fallback:
 
@@ -167,7 +185,7 @@ If plugins are unavailable, use direct registration:
 "$SOURCEBOOK" setup-client --client codex-cli
 ```
 
-On Windows PowerShell, use `& $Sourcebook setup-client --client codex-cli`. Direct registration saves this exact path, so do not move or delete the executable afterward. You can check the registrations with `codex mcp list`. OpenAI’s [MCP documentation](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) describes these shared CLI and desktop settings.
+On Windows PowerShell, use `& $Sourcebook setup-client --client codex-cli`. Direct registration saves this exact path, so do not move or delete the executable afterward. You can check the registrations with `codex mcp list`. OpenAI's [MCP documentation](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) describes these shared CLI and desktop settings.
 
 ## First use
 
@@ -184,7 +202,7 @@ For German legislative procedures, get a free API key from the [Bundestag DIP AP
 
 On Windows PowerShell, run `& $Sourcebook configure --credential DIP_API_KEY`, followed by `& $Sourcebook sync --source dip`.
 
-The key is entered in a hidden prompt and stored in your operating system’s credential store. It is not written to the MCP configuration. The first sync covers changes published during the previous day; use a bounded `backfill` for older dates. Sourcebook does not schedule refreshes, so run `sync` again when you want newer records. Restart the connected app after a sync so that it opens the updated local index.
+The key is entered in a hidden prompt and stored in your operating system's credential store. It is not written to the MCP configuration. The first sync covers changes published during the previous day; use a bounded `backfill` for older dates. Sourcebook does not schedule refreshes, so run `sync` again when you want newer records. Restart the connected app after a sync so that it opens the updated local index.
 
 For example, to add one older day on macOS:
 
@@ -221,13 +239,15 @@ Warnings about sources without credentials are normal. An `ERROR` line means tha
 
 ## Updating or removing Sourcebook
 
-Rebuild or replace the package first, then update the client:
+Download the newest GitHub release or rebuild the package first, then update the client:
 
 - Claude Desktop: remove the old extensions in **Settings → Extensions**, then install the new `.mcpb` files.
 - Claude Code: run `claude plugin update policy-research@policy-tools --scope user` after refreshing the marketplace, or uninstall and install it again.
 - Codex and ChatGPT desktop: rebuild the local package, run `codex plugin remove policy-research@policy-tools`, then run `codex plugin add policy-research@policy-tools` again. The marketplace stays configured.
 
-Removing a plugin does not remove Sourcebook’s local index or stored API keys.
+Removing a plugin does not remove Sourcebook's local index or stored API keys.
+
+Every push to `main` runs the complete source checks and native package tests. GitHub publishes a new release only after the macOS and Windows packages pass their packaged MCP tests. Pull requests run the same package validation without publishing a release.
 
 ## Privacy and limits
 

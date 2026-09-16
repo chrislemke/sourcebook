@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync --locked
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run ty check
+      - run: uv run pytest
+
+  package:
+    name: Build ${{ matrix.target }}
+    needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: darwin-arm64
+            binary: dist/policy-mcp
+            archive: dist/sourcebook-darwin-arm64.tar.gz
+          - runner: windows-2025
+            target: windows-x64
+            binary: dist/policy-mcp.exe
+            archive: dist/sourcebook-windows-x64.zip
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync --locked
+      - run: uv run pyinstaller --noconfirm --clean policy-mcp.spec
+      - run: uv run policy-mcp package --binary ${{ matrix.binary }} --output dist/packages --target ${{ matrix.target }}
+      - name: Exercise the packaged MCP servers
+        run: uv run pytest tests/test_release_artifacts.py
+        env:
+          SOURCEBOOK_TEST_BINARY: ${{ matrix.binary }}
+          SOURCEBOOK_TEST_PACKAGES: dist/packages
+          SOURCEBOOK_TEST_TARGET: ${{ matrix.target }}
+      - name: Archive macOS packages
+        if: runner.os == 'macOS'
+        run: tar -C dist/packages -czf dist/sourcebook-darwin-arm64.tar.gz .
+      - name: Archive Windows packages
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/packages/* -DestinationPath dist/sourcebook-windows-x64.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ matrix.target }}
+          path: ${{ matrix.archive }}
+          if-no-files-found: error
+
+  python-distribution:
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv build
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-python
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs:
+      - package
+      - python-distribution
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+      - name: Write checksums
+        working-directory: release-assets
+        run: sha256sum * > SHA256SUMS
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          tag="v${version}-main.${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" release-assets/* \
+            --target "$GITHUB_SHA" \
+            --title "Sourcebook ${tag}" \
+            --generate-notes

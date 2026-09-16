@@ -52,6 +52,8 @@ def test_builds_all_package_families_from_one_binary_and_skill(tmp_path: Path) -
             assert binary_info.external_attr >> 16 & stat.S_IXUSR
 
     claude_plugin = output / "claude-code-plugin" / "policy-research"
+    claude_manifest = load_json(claude_plugin / ".claude-plugin" / "plugin.json")
+    assert claude_manifest["repository"] == "https://github.com/chrislemke/sourcebook"
     claude_mcp = load_json(claude_plugin / ".mcp.json")
     assert list(claude_mcp) == ["policy-legislation", "policy-actors", "policy-evidence"]
     assert claude_mcp["policy-legislation"] == {
@@ -60,9 +62,11 @@ def test_builds_all_package_families_from_one_binary_and_skill(tmp_path: Path) -
     }
 
     openai_plugin = output / "openai-agent-plugin" / "policy-research"
-    assert load_json(openai_plugin / "plugin.json")["$schema"] == (
+    openai_manifest = load_json(openai_plugin / "plugin.json")
+    assert openai_manifest["$schema"] == (
         "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
     )
+    assert openai_manifest["repository"] == "https://github.com/chrislemke/sourcebook"
     openai_mcp = load_json(openai_plugin / "mcp.json")
     assert openai_mcp["mcpServers"]["policy-evidence"] == {
         "type": "stdio",

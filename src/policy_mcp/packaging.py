@@ -18,6 +18,7 @@ from policy_mcp.profiles import Profile
 PLUGIN_NAME: Final = "policy-research"
 DESCRIPTION: Final = "Local, read-only German federal and EU public-source research."
 AUTHOR: Final = {"name": "Sourcebook"}
+REPOSITORY_URL: Final = "https://github.com/chrislemke/sourcebook"
 FIXED_ZIP_TIMESTAMP: Final = (2026, 1, 1, 0, 0, 0)
 TARGET_PLATFORMS: Final = {
     "darwin-arm64": ("darwin", "policy-mcp"),
@@ -136,6 +137,8 @@ def _build_claude_code_plugin(binary: Path, output: Path, binary_name: str) -> P
             "version": __version__,
             "description": DESCRIPTION,
             "author": AUTHOR,
+            "homepage": REPOSITORY_URL,
+            "repository": REPOSITORY_URL,
         },
     )
     command = f"${{CLAUDE_PLUGIN_ROOT}}/bin/{binary_name}"
@@ -157,6 +160,8 @@ def _build_openai_plugin(binary: Path, output: Path, binary_name: str) -> Path:
             "name": PLUGIN_NAME,
             "version": __version__,
             "description": DESCRIPTION,
+            "homepage": REPOSITORY_URL,
+            "repository": REPOSITORY_URL,
             "extensions": {
                 "com.openai": {
                     "interface": {

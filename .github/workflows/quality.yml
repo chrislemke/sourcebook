@@ -3,15 +3,22 @@ name: Quality
 on:
   pull_request:
   push:
+    branches:
+      - main
   schedule:
     - cron: "17 6 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   checks:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
         with:
           enable-cache: true
       - run: uv python install 3.12
