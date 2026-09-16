@@ -1,0 +1,38 @@
+name: Package proof
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: darwin-arm64
+            binary: dist/policy-mcp
+          - runner: windows-2025
+            target: windows-x64
+            binary: dist/policy-mcp.exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync --locked
+      - run: uv run pyinstaller --noconfirm --clean policy-mcp.spec
+      - run: uv run policy-mcp package --binary ${{ matrix.binary }} --output dist/packages --target ${{ matrix.target }}
+      - run: uv run pytest
+        env:
+          SOURCEBOOK_TEST_BINARY: ${{ matrix.binary }}
+          SOURCEBOOK_TEST_PACKAGES: dist/packages
+          SOURCEBOOK_TEST_TARGET: ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sourcebook-${{ matrix.target }}
+          path: dist/packages
+          if-no-files-found: error

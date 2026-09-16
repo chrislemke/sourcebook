@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sourcebook"
+version = "0.1.0"
+description = "Sourcebook: local MCP servers for traceable German federal and EU political research"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "defusedxml>=0.7.1,<1",
+    "httpx>=0.28,<1",
+    "keyring>=25,<26",
+    "mcp[cli]>=2,<3",
+    "platformdirs>=4,<5",
+    "pydantic>=2.12,<3",
+    "pyyaml>=6,<7",
+]
+
+[project.scripts]
+policy-mcp = "policy_mcp.cli:main"
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.16,<7",
+    "pytest>=9,<10",
+    "pytest-asyncio>=1,<2",
+    "pytest-cov>=7,<8",
+    "respx>=0.22,<1",
+    "ruff>=0.13,<1",
+    "ty>=0.0.1a1,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/policy_mcp"]
+
+[tool.pytest.ini_options]
+minversion = "9.0"
+addopts = ["-ra", "--strict-config", "--strict-markers"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "release_artifact: requires a native binary and generated client packages",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["policy_mcp"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ty.environment]
+python-version = "3.12"
+root = ["./src"]
