@@ -43,23 +43,35 @@ def test_builds_all_package_families_from_one_binary_and_skill(tmp_path: Path) -
             assert manifest["name"] == f"policy-{profile}"
             assert manifest["compatibility"]["platforms"] == ["darwin"]
             assert manifest["server"]["type"] == "binary"
+            asks_for_dip_key = profile == "legislation"
             assert manifest["server"]["mcp_config"] == {
                 "command": "${__dirname}/server/policy-mcp",
                 "args": ["serve", "--profile", profile],
-                "env": {},
+                "env": ({"DIP_API_KEY": "${user_config.dip_api_key}"} if asks_for_dip_key else {}),
             }
+            if asks_for_dip_key:
+                option = manifest["user_config"]["dip_api_key"]
+                assert option["type"] == "string"
+                assert option["sensitive"] is True
+                assert option["required"] is False
+            else:
+                assert "user_config" not in manifest
             binary_info = archive.getinfo("server/policy-mcp")
             assert binary_info.external_attr >> 16 & stat.S_IXUSR
 
     claude_plugin = output / "claude-code-plugin" / "policy-research"
     claude_manifest = load_json(claude_plugin / ".claude-plugin" / "plugin.json")
     assert claude_manifest["repository"] == "https://github.com/chrislemke/sourcebook"
-    claude_mcp = load_json(claude_plugin / ".mcp.json")
+    assert claude_manifest["userConfig"]["dip_api_key"]["sensitive"] is True
+    assert claude_manifest["userConfig"]["dip_api_key"]["required"] is False
+    claude_mcp = load_json(claude_plugin / ".mcp.json")["mcpServers"]
     assert list(claude_mcp) == ["policy-legislation", "policy-actors", "policy-evidence"]
     assert claude_mcp["policy-legislation"] == {
         "command": "${CLAUDE_PLUGIN_ROOT}/bin/policy-mcp",
         "args": ["serve", "--profile", "legislation"],
+        "env": {"DIP_API_KEY": "${user_config.dip_api_key}"},
     }
+    assert "env" not in claude_mcp["policy-actors"]
 
     openai_plugin = output / "openai-agent-plugin" / "policy-research"
     openai_manifest = load_json(openai_plugin / "plugin.json")
@@ -130,4 +142,7 @@ def test_package_families_are_reproducible_and_contain_no_secrets(
             for member in archive.namelist():
                 content = archive.read(member)
                 assert b"seeded-test-secret" not in content
-                assert b"DIP_API_KEY" not in content
+            # Packages may name the key but only ever carry the client's placeholder.
+            assert set(manifest["server"]["mcp_config"]["env"].values()) <= {
+                "${user_config.dip_api_key}"
+            }

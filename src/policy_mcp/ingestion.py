@@ -13,6 +13,10 @@ from policy_mcp.adapters.dip import DipProcedure, DipProcedurePage
 from policy_mcp.storage import SyncRecord, persist_sync_window
 
 
+class DipWindowTooLargeError(RuntimeError):
+    """One modification window holds more records or pages than a bounded sync allows."""
+
+
 class DipPageClient(Protocol):
     """Small boundary used by the DIP worker and its contract tests."""
 
@@ -37,7 +41,8 @@ class SyncReport:
     persisted: int
 
 
-def _canonical_payload(procedure: DipProcedure) -> dict[str, object]:
+def dip_record_payload(procedure: DipProcedure) -> dict[str, object]:
+    """Project one normalized DIP procedure into the stored legislation record shape."""
     return {
         "key": f"dip:vorgang:{procedure.provider_id}",
         "kind": "procedure",
@@ -65,7 +70,7 @@ def _canonical_payload(procedure: DipProcedure) -> dict[str, object]:
 
 def dip_sync_record(procedure: DipProcedure) -> SyncRecord:
     """Convert one normalized DIP procedure into the stable storage envelope."""
-    payload = _canonical_payload(procedure)
+    payload = dip_record_payload(procedure)
     encoded = json.dumps(
         payload,
         ensure_ascii=False,
@@ -117,14 +122,14 @@ async def sync_dip_window(
             if modified_at <= until:
                 procedures[procedure.provider_id] = procedure
         if len(procedures) > max_records:
-            raise RuntimeError("DIP sync exceeded the record limit")
+            raise DipWindowTooLargeError("DIP sync exceeded the record limit")
         if page.next_cursor is None:
             break
         if page.next_cursor == cursor:
             raise RuntimeError("DIP sync pagination made no progress")
         cursor = page.next_cursor
         if page_number == max_pages:
-            raise RuntimeError("DIP sync exceeded the page limit")
+            raise DipWindowTooLargeError("DIP sync exceeded the page limit")
 
     records: Sequence[SyncRecord] = [
         dip_sync_record(procedure)
@@ -143,5 +148,73 @@ async def sync_dip_window(
         window_start=window_start,
         window_end=window_end,
         fetched=len(procedures),
+        persisted=persisted,
+    )
+
+
+class DipRangeClient(DipPageClient, Protocol):
+    """A page client that can also count a window before fetching its positions."""
+
+    async def count_modifications(
+        self,
+        since: datetime,
+        *,
+        until: datetime,
+        overlap: timedelta,
+    ) -> int: ...
+
+
+async def sync_dip_range(
+    client: DipRangeClient,
+    *,
+    since: datetime,
+    until: datetime,
+    overlap: timedelta = timedelta(hours=2),
+    chunk: timedelta = timedelta(hours=6),
+    min_chunk: timedelta = timedelta(minutes=15),
+    max_pages: int = 5,
+    max_records: int = 100,
+) -> SyncReport:
+    """Sync a long range as consecutive bounded windows, keeping each completed window."""
+    if since > until:
+        raise ValueError("DIP sync start must not be after its end")
+    if min_chunk <= timedelta(0) or chunk < min_chunk:
+        raise ValueError("DIP sync chunks must be positive")
+    start = since
+    size = chunk
+    window_overlap = overlap
+    fetched = 0
+    persisted = 0
+    while True:
+        end = min(start + size, until)
+        count = await client.count_modifications(start, until=end, overlap=window_overlap)
+        if count > max_records and end - start > min_chunk:
+            size = max((end - start) / 2, min_chunk)
+            continue
+        if count > max_records:
+            raise DipWindowTooLargeError(
+                f"DIP changed more than {max_records} procedures within {min_chunk}"
+            )
+        report = await sync_dip_window(
+            client,
+            since=start,
+            until=end,
+            overlap=window_overlap,
+            max_pages=max_pages,
+            max_records=max_records,
+        )
+        fetched += report.fetched
+        persisted += report.persisted
+        if end >= until:
+            break
+        start = end
+        size = chunk
+        # Only the first window needs overlap with the previous run's watermark.
+        window_overlap = timedelta(0)
+    return SyncReport(
+        source_id="dip",
+        window_start=since.isoformat(timespec="seconds"),
+        window_end=until.isoformat(timespec="seconds"),
+        fetched=fetched,
         persisted=persisted,
     )

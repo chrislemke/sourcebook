@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Final
 
 from policy_mcp import __version__
-from policy_mcp.contracts import PROFILE_TOOL_NAMES, tool_description
+from policy_mcp.contracts import PROFILE_DESCRIPTIONS, PROFILE_TOOL_NAMES, tool_description
 from policy_mcp.profiles import Profile
 
 PLUGIN_NAME: Final = "policy-research"
@@ -20,6 +20,14 @@ DESCRIPTION: Final = "Local, read-only German federal and EU public-source resea
 AUTHOR: Final = {"name": "Sourcebook"}
 REPOSITORY_URL: Final = "https://github.com/chrislemke/sourcebook"
 FIXED_ZIP_TIMESTAMP: Final = (2026, 1, 1, 0, 0, 0)
+DIP_KEY_OPTION: Final = "dip_api_key"
+DIP_KEY_TITLE: Final = "DIP API key (German Bundestag)"
+DIP_KEY_DESCRIPTION: Final = (
+    "Optional. Enables German legislation search. Use the free public key from "
+    "https://dip.bundestag.de/über-dip/hilfe/api or request a personal key from "
+    "parlamentsdokumentation@bundestag.de."
+)
+DIP_KEY_ENV: Final = {"DIP_API_KEY": f"${{user_config.{DIP_KEY_OPTION}}}"}
 TARGET_PLATFORMS: Final = {
     "darwin-arm64": ("darwin", "policy-mcp"),
     "windows-x64": ("win32", "policy-mcp.exe"),
@@ -61,21 +69,26 @@ def _copy_skill(plugin_root: Path) -> None:
     destination.write_bytes(_shared_skill_bytes())
 
 
-def _mcp_server(command: str, profile: Profile, *, portable: bool) -> dict[str, object]:
+def _mcp_server(
+    command: str, profile: Profile, *, portable: bool, user_config: bool = False
+) -> dict[str, object]:
     server: dict[str, object] = {
         "command": command,
         "args": ["serve", "--profile", profile.value],
     }
+    if user_config and profile == Profile.LEGISLATION:
+        server["env"] = dict(DIP_KEY_ENV)
     if portable:
         server = {"type": "stdio", **server}
     return server
 
 
 def _mcpb_manifest(profile: Profile, platform: str) -> dict[str, object]:
-    description = f"Local, read-only public-source tools for {profile.value} research."
+    description = PROFILE_DESCRIPTIONS[profile]
     binary_name = "policy-mcp.exe" if platform == "win32" else "policy-mcp"
     entry_point = f"server/{binary_name}"
-    return {
+    legislation = profile == Profile.LEGISLATION
+    manifest: dict[str, object] = {
         "manifest_version": "0.3",
         "name": profile.server_name,
         "display_name": f"Sourcebook {profile.value.title()}",
@@ -88,7 +101,7 @@ def _mcpb_manifest(profile: Profile, platform: str) -> dict[str, object]:
             "mcp_config": {
                 "command": f"${{__dirname}}/{entry_point}",
                 "args": ["serve", "--profile", profile.value],
-                "env": {},
+                "env": dict(DIP_KEY_ENV) if legislation else {},
             },
         },
         "tools": [
@@ -97,6 +110,17 @@ def _mcpb_manifest(profile: Profile, platform: str) -> dict[str, object]:
         ],
         "compatibility": {"platforms": [platform]},
     }
+    if legislation:
+        manifest["user_config"] = {
+            DIP_KEY_OPTION: {
+                "type": "string",
+                "title": DIP_KEY_TITLE,
+                "description": DIP_KEY_DESCRIPTION,
+                "sensitive": True,
+                "required": False,
+            }
+        }
+    return manifest
 
 
 def _zip_entry(name: str, content: bytes, mode: int) -> tuple[zipfile.ZipInfo, bytes]:
@@ -139,12 +163,27 @@ def _build_claude_code_plugin(binary: Path, output: Path, binary_name: str) -> P
             "author": AUTHOR,
             "homepage": REPOSITORY_URL,
             "repository": REPOSITORY_URL,
+            "userConfig": {
+                DIP_KEY_OPTION: {
+                    "type": "string",
+                    "title": DIP_KEY_TITLE,
+                    "description": DIP_KEY_DESCRIPTION,
+                    "sensitive": True,
+                    "required": False,
+                    "default": "",
+                }
+            },
         },
     )
     command = f"${{CLAUDE_PLUGIN_ROOT}}/bin/{binary_name}"
     _write_json(
         plugin / ".mcp.json",
-        {profile.server_name: _mcp_server(command, profile, portable=False) for profile in Profile},
+        {
+            "mcpServers": {
+                profile.server_name: _mcp_server(command, profile, portable=False, user_config=True)
+                for profile in Profile
+            }
+        },
     )
     _copy_binary(binary, plugin / "bin" / binary_name)
     _copy_skill(plugin)

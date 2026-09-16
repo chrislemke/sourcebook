@@ -17,10 +17,15 @@ import httpx
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 Resolver = Callable[[str], list[IPAddress]]
 Sleeper = Callable[[float], Awaitable[None]]
+QueryParams = Mapping[str, str | int] | list[tuple[str, str | float | None]]
 
 
 class SourceRequestError(RuntimeError):
     """A safe upstream error that contains no credentials or response body."""
+
+
+class SourceChallengeError(SourceRequestError):
+    """The source answered with a bot-protection challenge instead of data."""
 
 
 def resolve_host(host: str) -> list[IPAddress]:
@@ -44,6 +49,7 @@ class BoundedHttpClient:
     max_response_bytes: int = 5_000_000
     max_redirects: int = 3
     transient_retries: int = 2
+    challenge_paths: tuple[str, ...] = ()
 
     def _validate_url(self, url: str) -> None:
         parsed = urlsplit(url)
@@ -69,7 +75,7 @@ class BoundedHttpClient:
         url: str,
         *,
         headers: Mapping[str, str] | None = None,
-        params: Mapping[str, str | int] | None = None,
+        params: QueryParams | None = None,
         data: Mapping[str, str] | None = None,
     ) -> httpx.Response:
         """Send one bounded request, following only validated redirects."""
@@ -97,6 +103,8 @@ class BoundedHttpClient:
                         if redirects > self.max_redirects:
                             raise SourceRequestError("Source exceeded the redirect limit")
                         current = urljoin(current, location)
+                        if urlsplit(current).path.startswith(self.challenge_paths or ("\0",)):
+                            raise SourceChallengeError("Source answered with a bot challenge")
                         params = None
                         if response.status_code in {301, 302, 303}:
                             current_method = "GET"
@@ -147,7 +155,7 @@ class BoundedHttpClient:
         url: str,
         *,
         headers: Mapping[str, str] | None = None,
-        params: Mapping[str, str | int] | None = None,
+        params: QueryParams | None = None,
     ) -> httpx.Response:
         """Retrieve one bounded response."""
         return await self.request("GET", url, headers=headers, params=params)

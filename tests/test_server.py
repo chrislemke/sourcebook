@@ -254,3 +254,79 @@ async def test_evidence_profile_exposes_stable_research_contract(
     }
     by_route = {item["route"]: item for item in result.structured_content["sources"]}
     assert by_route["govdata.catalogue"]["operations"] == ["search", "get"]
+
+
+@pytest.mark.parametrize(
+    ("profile", "first_tool"),
+    [
+        ("actors", "actor_search"),
+        ("evidence", "evidence_search"),
+        ("legislation", "legislation_search"),
+    ],
+)
+def test_each_profile_tells_hosts_when_to_prefer_its_tools(
+    profile: str,
+    first_tool: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("POLICY_MCP_DATA_DIR", str(tmp_path))
+
+    server = create_server(profile)
+
+    assert server.instructions is not None
+    assert f"Prefer {first_tool} over web search" in server.instructions
+
+
+async def test_legislation_identifier_matches_the_dip_id_and_reports_utc_retrieval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("POLICY_MCP_DATA_DIR", str(tmp_path))
+    persist_sync_window(
+        "dip",
+        window_start="2026-09-15T00:00:00Z",
+        window_end="2026-09-16T00:00:00Z",
+        records=[
+            SyncRecord(
+                provider_id="334562",
+                provider_version="2026-09-15T12:00:00Z",
+                entity_kind="procedure",
+                content_hash="d" * 64,
+                source_timestamp="2026-09-15T12:00:00Z",
+                payload={
+                    "key": "dip:vorgang:334562",
+                    "kind": "procedure",
+                    "jurisdiction": "DE",
+                    "source": "dip",
+                    "provider_id": "334562",
+                    "identifier": "B045",
+                    "title": "Gesetz zur digitalen Verwaltung",
+                    "abstract": "",
+                    "subjects": [],
+                    "status": "Beratung",
+                    "source_language": "de",
+                    "official_url": "https://dip.bundestag.de/vorgang/334562",
+                    "source_modified_at": "2026-09-15T12:00:00Z",
+                    "events": [],
+                    "document_keys": [],
+                },
+            )
+        ],
+    )
+
+    server = create_server("legislation", principal="local-test")
+    results = [
+        await server.call_tool(
+            "legislation_search", {"jurisdiction": "DE", "identifier": identifier}
+        )
+        for identifier in ("334562", "B045")
+    ]
+
+    for result in results:
+        assert isinstance(result, CallToolResult)
+        assert result.structured_content is not None
+        item = result.structured_content["items"][0]
+        assert item["identifier"] == "B045"
+        assert item["provenance"]["retrieved_at"].endswith("Z")
+        assert "T" in item["provenance"]["retrieved_at"]

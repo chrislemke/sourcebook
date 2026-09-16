@@ -7,8 +7,13 @@ from mcp.server.mcpserver import MCPServer
 from policy_mcp import __version__
 from policy_mcp.actors import FrozenActorCatalog, LiveActorCatalog, register_actor_tools
 from policy_mcp.adapters.govdata import LiveGovDataService
+from policy_mcp.contracts import PROFILE_DESCRIPTIONS, PROFILE_INSTRUCTIONS
 from policy_mcp.evidence import FrozenEvidenceCatalog, register_evidence_tools
-from policy_mcp.legislation import FrozenLegislationCatalog, register_legislation_tools
+from policy_mcp.legislation import (
+    FrozenLegislationCatalog,
+    LiveDipLegislation,
+    register_legislation_tools,
+)
 from policy_mcp.profiles import Profile
 from policy_mcp.references import SQLiteReferenceStore
 from policy_mcp.storage import open_database
@@ -27,7 +32,8 @@ def create_server(
     server: MCPServer[None] = MCPServer(
         name=selected.server_name,
         title=f"Sourcebook {selected.value}",
-        description="Local, read-only German federal and EU political research.",
+        description=PROFILE_DESCRIPTIONS[selected],
+        instructions=PROFILE_INSTRUCTIONS[selected],
         version=__version__,
     )
 
@@ -36,6 +42,7 @@ def create_server(
             server,
             legislation_catalog or FrozenLegislationCatalog.from_database(),
             SQLiteReferenceStore(principal=principal),
+            live_dip=LiveDipLegislation(),
         )
         return server
     if selected == Profile.ACTORS:

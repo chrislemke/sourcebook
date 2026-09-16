@@ -23,7 +23,7 @@ from policy_mcp.diagnostics import (
     store_credential,
 )
 from policy_mcp.evaluation import RoutingDecision, load_corpus, run_evaluation
-from policy_mcp.ingestion import sync_dip_window
+from policy_mcp.ingestion import sync_dip_range
 from policy_mcp.operations import (
     backup_state,
     restore_state,
@@ -186,11 +186,11 @@ async def _run_dip_sync(
     try:
         timeout = httpx.Timeout(30.0, connect=5.0)
         async with httpx.AsyncClient(timeout=timeout) as http:
-            report = await sync_dip_window(
+            report = await sync_dip_range(
                 DipClient(http, api_key=api_key),
                 since=since,
                 until=until,
-                max_pages=10,
+                max_pages=5,
                 max_records=250,
             )
     except (DipProviderError, httpx.HTTPError, OSError, RuntimeError) as error:

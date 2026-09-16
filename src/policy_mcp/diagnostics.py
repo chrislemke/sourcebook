@@ -73,14 +73,15 @@ def store_credential(name: CredentialName) -> None:
 
 def load_credential(name: CredentialName) -> str | None:
     """Read one credential from the environment or OS store without logging it."""
-    environment_value = os.environ.get(name)
-    if environment_value:
+    environment_value = (os.environ.get(name) or "").strip()
+    # Client installers may pass an unresolved "${user_config...}" placeholder for an empty field.
+    if environment_value and not environment_value.startswith("${"):
         return environment_value
     try:
         stored = keyring.get_password(CREDENTIAL_SERVICE, name)
     except KeyringError:
         return None
-    return stored or None
+    return (stored or "").strip() or None
 
 
 def _client_executable(client: ClientName) -> Path | None:
@@ -194,6 +195,18 @@ def run_doctor(client: ClientName | None = None) -> DoctorReport:
                 f"Credential backend: {type(backend).__name__}; "
                 f"{sum(name in os.environ for name in CREDENTIAL_NAMES)} environment "
                 "credential names configured"
+            ),
+        )
+    )
+
+    checks.append(
+        DoctorCheck(
+            "dip_api_key",
+            "ok" if load_credential("DIP_API_KEY") else "warning",
+            (
+                "DIP_API_KEY is configured; legislation searches query DIP live"
+                if load_credential("DIP_API_KEY")
+                else "DIP_API_KEY is not configured; German legislation search is unavailable"
             ),
         )
     )

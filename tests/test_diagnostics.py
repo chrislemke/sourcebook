@@ -32,6 +32,7 @@ def test_doctor_reports_shared_store_without_secrets(
         "data_directory",
         "database",
         "credential_store",
+        "dip_api_key",
         "route_registry",
         "index_state",
         "sync_state",

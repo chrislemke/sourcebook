@@ -11,6 +11,7 @@ import pytest
 
 from policy_mcp.adapters.dip import (
     DipAuthenticationError,
+    DipChallengeError,
     DipClient,
     DipProviderError,
 )
@@ -351,3 +352,73 @@ async def test_client_rejects_an_unofficial_base_url() -> None:
     ) as async_client:
         with pytest.raises(ValueError, match="official HTTPS"):
             DipClient(async_client, api_key=API_KEY, base_url="https://attacker.example/api/v1")
+
+
+async def test_empty_optional_provider_strings_are_treated_as_absent() -> None:
+    position = position_payload(
+        identifier="1", institution="BT", number="21/61", document_id="9", label="1. Beratung"
+    )
+    assert isinstance(position["fundstelle"], dict)
+    position["fundstelle"]["anfangsquadrant"] = ""
+    position["fundstelle"]["endquadrant"] = ""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/vorgang"):
+            return response(
+                request, {"numFound": 1, "cursor": "c", "documents": [procedure_payload()]}
+            )
+        return response(request, {"numFound": 1, "cursor": "p", "documents": [position]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        page = await DipClient(
+            http, api_key=API_KEY, resolver=public_resolver, min_request_interval=0
+        ).fetch_procedures("334562")
+
+    assert page.items[0].events[0].label == "1. Beratung"
+
+
+async def test_bot_challenge_is_reported_instead_of_followed() -> None:
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(
+            303,
+            request=request,
+            headers={"location": "/.enodia/challenge?redirect=%2Fapi%2Fv1%2Fvorgang"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        with pytest.raises(DipChallengeError, match="bot protection"):
+            await DipClient(
+                http, api_key=API_KEY, resolver=public_resolver, min_request_interval=0
+            ).fetch_procedures("334562")
+
+    assert requested == ["/api/v1/vorgang"]
+
+
+async def test_requests_are_paced_to_avoid_the_bot_challenge() -> None:
+    now = 100.0
+    sleeps: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return response(request, {"numFound": 0, "cursor": "c", "documents": []})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = DipClient(
+            http,
+            api_key=API_KEY,
+            resolver=public_resolver,
+            min_request_interval=1.0,
+            clock=lambda: now,
+            sleep=sleep,
+        )
+        await client.fetch_procedures("1")
+        await client.fetch_procedures("2")
+
+    assert sleeps == [1.0]

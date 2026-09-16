@@ -2,17 +2,27 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import asyncio
+import time
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from policy_mcp.source_http import BoundedHttpClient, Resolver, SourceRequestError, resolve_host
+from policy_mcp.source_http import (
+    BoundedHttpClient,
+    Resolver,
+    SourceChallengeError,
+    SourceRequestError,
+    resolve_host,
+)
 
 DEFAULT_BASE_URL = "https://search.dip.bundestag.de/api/v1"
+# DIP publishes no rate limit, but its bot protection challenges fast sequential clients.
+DEFAULT_MIN_REQUEST_INTERVAL_SECONDS = 1.0
 OFFICIAL_API_HOST = "search.dip.bundestag.de"
 OFFICIAL_DOCUMENT_HOSTS = frozenset(
     {
@@ -23,6 +33,7 @@ OFFICIAL_DOCUMENT_HOSTS = frozenset(
 )
 Identifier = Annotated[str, Field(pattern=r"^[0-9]+$")]
 NonEmptyString = Annotated[str, Field(min_length=1)]
+DipQuery = Mapping[str, str] | list[tuple[str, str | float | None]]
 IsoDate = Annotated[str, Field(pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")]
 IsoDateTime = Annotated[
     str,
@@ -43,8 +54,32 @@ class DipAuthenticationError(DipProviderError):
     """DIP rejected the configured API key."""
 
 
+class DipChallengeError(DipProviderError):
+    """DIP bot protection challenged this client instead of returning data."""
+
+
 class _FrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+
+class _RawModel(_FrozenModel):
+    """A provider payload whose optional fields DIP sometimes sends as empty strings."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def empty_optional_strings_are_absent(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        return {
+            key: (
+                None
+                if item == ""
+                and key in cls.model_fields
+                and not cls.model_fields[key].is_required()
+                else item
+            )
+            for key, item in value.items()
+        }
 
 
 class _RawDescriptor(_FrozenModel):
@@ -53,7 +88,7 @@ class _RawDescriptor(_FrozenModel):
     fundstelle: bool
 
 
-class _RawProcedureLink(_FrozenModel):
+class _RawProcedureLink(_RawModel):
     id: Identifier
     verweisung: NonEmptyString
     titel: NonEmptyString
@@ -61,7 +96,7 @@ class _RawProcedureLink(_FrozenModel):
     gesta: str | None = None
 
 
-class _RawProcedure(_FrozenModel):
+class _RawProcedure(_RawModel):
     id: Identifier
     typ: Literal["Vorgang"]
     beratungsstand: str | None = None
@@ -86,7 +121,7 @@ class _RawProcedure(_FrozenModel):
     sek: str | None = None
 
 
-class _RawFinding(_FrozenModel):
+class _RawFinding(_RawModel):
     id: Identifier
     dokumentnummer: NonEmptyString
     datum: IsoDate
@@ -123,7 +158,7 @@ class _RawFinding(_FrozenModel):
         return value
 
 
-class _RawPosition(_FrozenModel):
+class _RawPosition(_RawModel):
     id: Identifier
     vorgangsposition: NonEmptyString
     zuordnung: Literal["BT", "BR", "BV", "EK"]
@@ -246,6 +281,9 @@ class DipClient:
         max_response_bytes: int = 2_000_000,
         include_positions: bool = True,
         resolver: Resolver = resolve_host,
+        min_request_interval: float = DEFAULT_MIN_REQUEST_INTERVAL_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         if not api_key:
             raise ValueError("DIP API key must not be empty")
@@ -267,7 +305,12 @@ class DipClient:
             allowed_hosts={OFFICIAL_API_HOST},
             resolver=resolver,
             max_response_bytes=max_response_bytes,
+            challenge_paths=("/.enodia/",),
         )
+        self._min_request_interval = max(min_request_interval, 0.0)
+        self._clock = clock
+        self._sleep = sleep
+        self._last_request_at: float | None = None
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._max_pages = max_pages
@@ -286,6 +329,29 @@ class DipClient:
         parameters = {"f.id": provider_id}
         if cursor is not None:
             parameters["cursor"] = self._validate_cursor(cursor)
+        page = await self._procedure_page(parameters)
+        return await self._normalize_page(page, requested_cursor=cursor, window_start=None)
+
+    async def search_procedures(
+        self,
+        *,
+        titles: tuple[str, ...] = (),
+        ids: tuple[str, ...] = (),
+        gesta: str | None = None,
+        cursor: str | None = None,
+    ) -> DipProcedurePage:
+        """Fetch one page of procedures by title words, DIP ids, or a GESTA number."""
+        if not titles and not ids and gesta is None:
+            raise ValueError("DIP search needs titles, ids, or a GESTA number")
+        if any(not item.isascii() or not item.isdigit() for item in ids):
+            raise ValueError("DIP procedure identifier must contain only digits")
+        parameters: list[tuple[str, str | float | None]] = [
+            *(("f.titel", title) for title in titles),
+            *(("f.id", identifier) for identifier in ids),
+            *((("f.gesta", gesta),) if gesta is not None else ()),
+        ]
+        if cursor is not None:
+            parameters.append(("cursor", self._validate_cursor(cursor)))
         page = await self._procedure_page(parameters)
         return await self._normalize_page(page, requested_cursor=cursor, window_start=None)
 
@@ -325,7 +391,7 @@ class DipClient:
             raise ValueError("Invalid DIP provider cursor")
         return cursor
 
-    async def _procedure_page(self, parameters: Mapping[str, str]) -> _RawProcedurePage:
+    async def _procedure_page(self, parameters: DipQuery) -> _RawProcedurePage:
         payload = await self._get("vorgang", parameters)
         try:
             page = _RawProcedurePage.model_validate(payload)
@@ -446,13 +512,39 @@ class DipClient:
             related_procedures=relations,
         )
 
-    async def _get(self, operation: str, parameters: Mapping[str, str]) -> object:
+    async def count_modifications(
+        self,
+        since: datetime,
+        *,
+        until: datetime,
+        overlap: timedelta,
+    ) -> int:
+        """Return how many procedures changed in a window without fetching their positions."""
+        parameters = {
+            "f.aktualisiert.start": (since - overlap).isoformat(timespec="seconds"),
+            "f.aktualisiert.end": until.isoformat(timespec="seconds"),
+        }
+        return (await self._procedure_page(parameters)).numFound
+
+    async def _pace(self) -> None:
+        if self._last_request_at is not None:
+            remaining = self._min_request_interval - (self._clock() - self._last_request_at)
+            if remaining > 0:
+                await self._sleep(remaining)
+        self._last_request_at = self._clock()
+
+    async def _get(self, operation: str, parameters: DipQuery) -> object:
+        await self._pace()
         try:
             response = await self._http.get(
                 f"{self._base_url}/{operation}",
                 headers={"Authorization": f"ApiKey {self._api_key}"},
                 params=parameters,
             )
+        except SourceChallengeError:
+            raise DipChallengeError(
+                "DIP bot protection challenged the request. Wait several minutes, then sync again."
+            ) from None
         except SourceRequestError as error:
             if "response limit" in str(error):
                 raise DipProviderError("DIP response exceeded the response limit") from None

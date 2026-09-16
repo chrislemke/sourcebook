@@ -5,14 +5,20 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
+import httpx
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
+from policy_mcp.adapters.dip import DipAuthenticationError, DipClient, DipProviderError
 from policy_mcp.contracts import tool_description
+from policy_mcp.diagnostics import load_credential
+from policy_mcp.ingestion import dip_record_payload
 from policy_mcp.references import (
     MAX_SNAPSHOT_ITEMS,
     ExpiredCursorError,
@@ -199,7 +205,8 @@ class FrozenLegislationCatalog:
                     records.append(record)
             except (json.JSONDecodeError, TypeError, ValueError):
                 continue
-            retrieved_at = max(retrieved_at, str(row_retrieved_at))
+            # SQLite CURRENT_TIMESTAMP is UTC without a zone marker.
+            retrieved_at = max(retrieved_at, str(row_retrieved_at).replace(" ", "T") + "Z")
         return cls(
             _Fixture(
                 retrieved_at=retrieved_at,
@@ -219,7 +226,10 @@ class FrozenLegislationCatalog:
                 continue
             if request.source is not None and record.source != request.source:
                 continue
-            if wanted is not None and record.identifier.casefold() != wanted:
+            if wanted is not None and wanted not in {
+                record.identifier.casefold(),
+                record.provider_id.casefold(),
+            }:
                 continue
             searchable = " ".join([record.title, record.abstract, *record.subjects]).casefold()
             if wanted is None and not all(term in searchable for term in terms):
@@ -234,6 +244,97 @@ class FrozenLegislationCatalog:
 
     def document(self, key: str) -> _Document | None:
         return self._documents.get(key)
+
+
+class DipLiveUnavailableError(RuntimeError):
+    """DIP could not answer a live request; the message is safe to show."""
+
+
+class DipKeyRejectedError(DipLiveUnavailableError):
+    """DIP rejected the configured API key."""
+
+
+class LiveDipLegislation:
+    """Query German federal procedures from DIP on demand when an API key is configured."""
+
+    def __init__(
+        self,
+        *,
+        api_key: Callable[[], str | None] = lambda: load_credential("DIP_API_KEY"),
+        timeout_seconds: float = 30.0,
+        client: Callable[[httpx.AsyncClient, str, bool], DipClient] | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._api_key = api_key
+        self._timeout = httpx.Timeout(timeout_seconds, connect=min(timeout_seconds, 10.0))
+        self._client = client or (
+            lambda http, key, positions: DipClient(http, api_key=key, include_positions=positions)
+        )
+        self._transport = transport
+
+    @property
+    def configured(self) -> bool:
+        return self._api_key() is not None
+
+    async def search(self, request: SearchInput) -> list[_Record]:
+        """Search DIP titles, DIP ids, or GESTA numbers and return procedures without steps."""
+        if request.identifier is not None:
+            identifier = request.identifier.strip()
+            if identifier.isascii() and identifier.isdigit():
+                return await self._records(ids=(identifier,), positions=False)
+            return await self._records(gesta=identifier, positions=False)
+        assert request.query is not None
+        words = request.query.split()
+        records = await self._records(titles=(request.query,), positions=False)
+        if records or len(words) < 2:
+            return records
+        # DIP searches several words as one phrase. Retry with the longest, usually most
+        # selective word and keep titles that contain every word.
+        candidates = await self._records(titles=(max(words, key=len),), positions=False)
+        wanted = [word.casefold() for word in words]
+        return [
+            record
+            for record in candidates
+            if all(word in record.title.casefold() for word in wanted)
+        ]
+
+    async def procedure(self, provider_id: str) -> _Record | None:
+        """Fetch one procedure with its dated steps."""
+        records = await self._records(ids=(provider_id,), positions=True)
+        return records[0] if records else None
+
+    async def records(self, provider_ids: list[str]) -> list[_Record]:
+        """Fetch procedures for stored search keys without their steps."""
+        if not provider_ids:
+            return []
+        return await self._records(ids=tuple(provider_ids), positions=False)
+
+    async def _records(
+        self,
+        *,
+        titles: tuple[str, ...] = (),
+        ids: tuple[str, ...] = (),
+        gesta: str | None = None,
+        positions: bool,
+    ) -> list[_Record]:
+        key = self._api_key()
+        if key is None:
+            raise DipLiveUnavailableError("DIP_API_KEY is not configured.")
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as http:
+                client = self._client(http, key, positions)
+                page = await client.search_procedures(titles=titles, ids=ids, gesta=gesta)
+        except DipAuthenticationError:
+            raise DipKeyRejectedError(
+                "DIP rejected the configured API key. Check or replace DIP_API_KEY."
+            ) from None
+        except DipProviderError as error:
+            raise DipLiveUnavailableError(str(error)) from None
+        return [_Record.model_validate(dip_record_payload(item)) for item in page.items]
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _query_hash(request: SearchInput) -> str:
@@ -254,7 +355,7 @@ def _provenance(catalog: FrozenLegislationCatalog, record: _Record | _Document) 
 
 def _coverage(source: str, jurisdiction: Jurisdiction) -> Coverage:
     limitation = (
-        "The local fixture is not a complete historical backfill."
+        "The local index is not a complete historical backfill."
         if source == "dip"
         else "CELLAR identifier retrieval is not full-text EUR-Lex search."
     )
@@ -331,10 +432,102 @@ def _strict_tool_inputs(server: MCPServer[Any], names: list[str]) -> None:
         tool.parameters = tool.fn_metadata.arg_model.model_json_schema(by_alias=True)
 
 
+DIP_KEY_PREFIX = "dip:vorgang:"
+LIVE_DIP_COVERAGE = Coverage(
+    source="dip",
+    jurisdiction=Jurisdiction.DE,
+    complete=False,
+    limitations=[
+        "Live DIP search matches words in procedure titles, not abstracts or document text."
+    ],
+)
+DIP_SETUP_MESSAGE = (
+    "German legislation search needs a DIP API key. Claude Desktop: open Settings > "
+    "Extensions > Sourcebook Legislation and enter it. Claude Code: reinstall the plugin with "
+    "--config dip_api_key=... or run `policy-mcp configure --credential DIP_API_KEY`. The "
+    "Bundestag publishes a free public key at https://dip.bundestag.de/über-dip/hilfe/api."
+)
+
+
+def _live_catalog(records: list[_Record]) -> FrozenLegislationCatalog:
+    retrieved_at = _now()
+    return FrozenLegislationCatalog(
+        _Fixture(retrieved_at=retrieved_at, indexed_at=retrieved_at, records=records, documents=[])
+    )
+
+
+async def _live_dip_search(
+    live_dip: LiveDipLegislation,
+    reference_store: ReferenceStore,
+    request: SearchInput,
+) -> SearchResponse:
+    digest = _query_hash(request)
+    try:
+        if request.cursor is None:
+            matches = await live_dip.search(request)
+            page = reference_store.first_page(
+                [record.key for record in matches],
+                principal=reference_store.principal,
+                query_hash=digest,
+                limit=request.limit,
+            )
+            by_key = {record.key: record for record in matches}
+            records = [by_key[key] for key in page.keys if key in by_key]
+        else:
+            page = reference_store.next_page(
+                request.cursor,
+                principal=reference_store.principal,
+                query_hash=digest,
+                limit=request.limit,
+            )
+            fetched = await live_dip.records(
+                [key.removeprefix(DIP_KEY_PREFIX) for key in page.keys]
+            )
+            by_key = {record.key: record for record in fetched}
+            records = [by_key[key] for key in page.keys if key in by_key]
+    except ForgedCursorError:
+        return _source_error("forged_cursor", "The continuation does not belong to this query.")
+    except ExpiredCursorError:
+        response = _source_error("expired_cursor", "The continuation expired.")
+        response.error = _error(
+            "expired_cursor",
+            "The continuation expired. Restart the search without a cursor.",
+            retryable=True,
+        )
+        return response
+    except DipKeyRejectedError as error:
+        return _source_error("not_configured", f"{error} {DIP_SETUP_MESSAGE}")
+    except DipLiveUnavailableError as error:
+        response = _source_error("temporarily_unavailable", "DIP could not be reached.")
+        response.error = _error(
+            "temporarily_unavailable", f"DIP could not be reached. {error}", retryable=True
+        )
+        return response
+    except ValueError:
+        return _source_error("oversized", "The search matched too many bounded results.")
+    live_catalog = _live_catalog(records)
+    cards = [_card(live_catalog, reference_store, record, request.language) for record in records]
+    response = SearchResponse(
+        status=ResearchStatus.OK,
+        items=cards,
+        continuation=(
+            Continuation(cursor=page.cursor, expires_at=page.expires_at.isoformat())
+            if page.cursor is not None and page.expires_at is not None
+            else None
+        ),
+        coverage=[LIVE_DIP_COVERAGE],
+        freshness=[_freshness(live_catalog, "dip")],
+        provenance=[card.provenance for card in cards],
+    )
+    return _trim_whole_items(response, "items")
+
+
 def register_legislation_tools(
     server: MCPServer[Any],
     catalog: FrozenLegislationCatalog,
     reference_store: ReferenceStore,
+    *,
+    live_dip: LiveDipLegislation | None = None,
 ) -> None:
     """Register the six stable read-only legislation tools."""
     annotations = ToolAnnotations(
@@ -350,10 +543,30 @@ def register_legislation_tools(
         annotations=annotations,
         structured_output=True,
     )
-    def legislation_search(
-        jurisdiction: Jurisdiction,
-        query: Annotated[str | None, Field(min_length=1, max_length=300)] = None,
-        identifier: Annotated[str | None, Field(min_length=1, max_length=100)] = None,
+    async def legislation_search(
+        jurisdiction: Annotated[
+            Jurisdiction,
+            Field(description="DE for German federal procedures; EU is not connected yet."),
+        ],
+        query: Annotated[
+            str | None,
+            Field(
+                min_length=1,
+                max_length=300,
+                description="German topic words matched against titles, abstracts, and subjects.",
+            ),
+        ] = None,
+        identifier: Annotated[
+            str | None,
+            Field(
+                min_length=1,
+                max_length=100,
+                description=(
+                    "Exact DIP procedure id, or a GESTA number such as G006. GESTA numbers "
+                    "repeat across electoral terms."
+                ),
+            ),
+        ] = None,
         kind: Literal["procedure", "legal_text"] = "procedure",
         source: Literal["dip", "ep", "cellar", "eurlex"] | None = None,
         language: Literal["de", "en"] = "de",
@@ -373,10 +586,22 @@ def register_legislation_tools(
         expected_source = request.source or (
             "dip" if request.jurisdiction == Jurisdiction.DE else "cellar"
         )
+        use_live_dip = (
+            expected_source == "dip"
+            and request.jurisdiction == Jurisdiction.DE
+            and request.kind == "procedure"
+            and live_dip is not None
+            and live_dip.configured
+        )
+        if use_live_dip:
+            assert live_dip is not None
+            return await _live_dip_search(live_dip, reference_store, request)
         if expected_source not in catalog.searchable_sources:
             return _source_error(
                 "not_configured",
-                f"Source {expected_source} has not passed its ingestion gate.",
+                DIP_SETUP_MESSAGE
+                if expected_source == "dip"
+                else f"Source {expected_source} has not passed its ingestion gate.",
             )
         if request.jurisdiction == Jurisdiction.EU and request.query is not None:
             return _source_error(
@@ -446,8 +671,11 @@ def register_legislation_tools(
         annotations=annotations,
         structured_output=True,
     )
-    def legislation_procedure(
-        reference: Annotated[str, Field(min_length=12, max_length=200)],
+    async def legislation_procedure(
+        reference: Annotated[
+            str,
+            Field(min_length=12, max_length=200, description="Reference from legislation_search."),
+        ],
         language: Literal["de", "en"] = "de",
     ) -> ProcedureResponse:
         request = ProcedureInput(reference=reference, language=language)
@@ -463,6 +691,27 @@ def register_legislation_tools(
                 error=_error("forged_reference", "The procedure reference is invalid."),
             )
         record = catalog.record(key)
+        catalog_for_record = catalog
+        if live_dip is not None and live_dip.configured and key.startswith(DIP_KEY_PREFIX):
+            try:
+                live_record = await live_dip.procedure(key.removeprefix(DIP_KEY_PREFIX))
+            except DipLiveUnavailableError as error:
+                if record is None:
+                    rejected = isinstance(error, DipKeyRejectedError)
+                    return ProcedureResponse(
+                        status=ResearchStatus.ERROR,
+                        error=_error(
+                            "not_configured" if rejected else "temporarily_unavailable",
+                            f"{error} {DIP_SETUP_MESSAGE}"
+                            if rejected
+                            else f"DIP could not be reached. {error}",
+                            retryable=not rejected,
+                        ),
+                    )
+            else:
+                if live_record is not None:
+                    record = live_record
+                    catalog_for_record = _live_catalog([live_record])
         if record is None:
             return ProcedureResponse(
                 status=ResearchStatus.ERROR,
@@ -487,7 +736,7 @@ def register_legislation_tools(
                     provenance=provenance,
                 )
             )
-        provenance = _provenance(catalog, record)
+        provenance = _provenance(catalog_for_record, record)
         response = ProcedureResponse(
             status=ResearchStatus.OK,
             procedure=ProcedureDetail(
@@ -501,8 +750,12 @@ def register_legislation_tools(
                 ],
                 documents=documents,
             ),
-            coverage=[_coverage(record.source, record.jurisdiction)],
-            freshness=[_freshness(catalog, record.source, record.source_modified_at)],
+            coverage=[
+                LIVE_DIP_COVERAGE
+                if catalog_for_record is not catalog
+                else _coverage(record.source, record.jurisdiction)
+            ],
+            freshness=[_freshness(catalog_for_record, record.source, record.source_modified_at)],
             provenance=[provenance, *[item.provenance for item in documents]],
         )
         return fit_response(response, documents)
@@ -668,7 +921,10 @@ def register_legislation_tools(
         source: Literal["dip", "ep", "cellar", "eurlex"] | None = None,
     ) -> CapabilitiesResponse:
         request = CapabilitiesInput(jurisdiction=jurisdiction, source=source)
-        dip_operations = catalog.available_operations("dip")
+        dip_live = live_dip is not None and live_dip.configured
+        dip_operations = (
+            ["search", "procedure"] if dip_live else catalog.available_operations("dip")
+        )
         cellar_operations = catalog.available_operations("cellar")
         capabilities = [
             SourceCapability(
@@ -676,7 +932,16 @@ def register_legislation_tools(
                 jurisdiction=Jurisdiction.DE,
                 state="ready" if dip_operations else "not_configured",
                 operations=dip_operations,
-                limitations=["The local index is not a complete historical backfill."],
+                limitations=(
+                    [
+                        "Live DIP search matches words in procedure titles, DIP ids, and GESTA "
+                        "numbers."
+                    ]
+                    if dip_live
+                    else ["The local index is not a complete historical backfill."]
+                    if dip_operations
+                    else [DIP_SETUP_MESSAGE]
+                ),
             ),
             SourceCapability(
                 source="cellar",

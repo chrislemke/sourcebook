@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 
 from policy_mcp.adapters.dip import DipProcedure, DipProcedurePage
-from policy_mcp.ingestion import dip_sync_record, sync_dip_window
+from policy_mcp.ingestion import (
+    DipWindowTooLargeError,
+    dip_sync_record,
+    sync_dip_range,
+    sync_dip_window,
+)
 from policy_mcp.storage import open_database
 
 
@@ -151,3 +156,75 @@ async def test_failed_dip_page_does_not_persist_or_advance_watermark(
     with open_database() as connection:
         assert connection.execute("SELECT COUNT(*) FROM records").fetchone() == (0,)
         assert connection.execute("SELECT COUNT(*) FROM sync_state").fetchone() == (0,)
+
+
+class _CountedWindows:
+    """Serve one procedure per window and report a large count for long windows."""
+
+    def __init__(self, *, large_after: timedelta) -> None:
+        self.large_after = large_after
+        self.windows: list[tuple[datetime, datetime, timedelta]] = []
+
+    async def count_modifications(
+        self, since: datetime, *, until: datetime, overlap: timedelta
+    ) -> int:
+        return 500 if until - since > self.large_after else 1
+
+    async def fetch_modifications(
+        self,
+        since: datetime,
+        *,
+        until: datetime | None = None,
+        overlap: timedelta,
+        cursor: str | None = None,
+    ) -> DipProcedurePage:
+        del cursor
+        assert until is not None
+        self.windows.append((since, until, overlap))
+        modified = until.isoformat().replace("+00:00", "Z")
+        return DipProcedurePage(
+            items=(_procedure(str(len(self.windows)), modified),),
+            total_found=1,
+            next_cursor=None,
+        )
+
+
+async def test_busy_range_is_split_and_each_window_advances_the_watermark(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("POLICY_MCP_DATA_DIR", str(tmp_path))
+    client = _CountedWindows(large_after=timedelta(hours=3))
+
+    report = await sync_dip_range(
+        client,
+        since=datetime(2026, 9, 15, 0, tzinfo=UTC),
+        until=datetime(2026, 9, 15, 6, tzinfo=UTC),
+        max_records=250,
+    )
+
+    assert [(start.hour, end.hour) for start, end, _ in client.windows] == [(0, 3), (3, 6)]
+    assert [overlap for _, _, overlap in client.windows] == [timedelta(hours=2), timedelta(0)]
+    assert report.fetched == 2
+    with open_database() as connection:
+        assert connection.execute(
+            "SELECT completed_watermark FROM sync_state WHERE source_id = 'dip'"
+        ).fetchone() == ("2026-09-15T06:00:00+00:00",)
+
+
+async def test_window_that_stays_too_large_fails_without_fetching_positions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("POLICY_MCP_DATA_DIR", str(tmp_path))
+    client = _CountedWindows(large_after=timedelta(0))
+
+    with pytest.raises(DipWindowTooLargeError):
+        await sync_dip_range(
+            client,
+            since=datetime(2026, 9, 15, 0, tzinfo=UTC),
+            until=datetime(2026, 9, 15, 6, tzinfo=UTC),
+            max_records=250,
+        )
+
+    assert client.windows == []
