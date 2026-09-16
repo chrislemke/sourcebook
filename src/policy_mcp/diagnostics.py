@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from getpass import getpass
@@ -12,6 +14,7 @@ from pathlib import Path
 from typing import Literal
 
 import keyring
+from keyring.errors import KeyringError
 
 from policy_mcp.registry import RouteState, load_registry
 from policy_mcp.resources import bundled_resource
@@ -70,6 +73,18 @@ def store_credential(name: CredentialName) -> None:
     keyring.set_password(CREDENTIAL_SERVICE, name, value)
 
 
+def load_credential(name: CredentialName) -> str | None:
+    """Read one credential from the environment or OS store without logging it."""
+    environment_value = os.environ.get(name)
+    if environment_value:
+        return environment_value
+    try:
+        stored = keyring.get_password(CREDENTIAL_SERVICE, name)
+    except KeyringError:
+        return None
+    return stored or None
+
+
 def _client_executable(client: ClientName) -> Path | None:
     if client == "claude-code":
         found = shutil.which("claude")
@@ -96,11 +111,8 @@ def _registration_files(client: ClientName) -> tuple[Path, ...]:
             home / ".claude.json",
         )
     if client == "chatgpt-desktop":
-        return (home / ".agents/plugins/marketplace.json",)
-    return (
-        home / ".agents/plugins/marketplace.json",
-        home / ".codex/config.toml",
-    )
+        return (home / ".codex/config.toml",)
+    return (home / ".codex/config.toml",)
 
 
 def _has_registration(path: Path) -> bool:
@@ -109,6 +121,38 @@ def _has_registration(path: Path) -> bool:
     except OSError:
         return False
     return "policy-research" in content or "policy-legislation" in content
+
+
+def _has_installed_plugin(client: ClientName) -> bool:
+    command_name = "claude" if client == "claude-code" else "codex"
+    if client == "claude-desktop":
+        return False
+    executable = shutil.which(command_name)
+    if executable is None:
+        return False
+    try:
+        completed = subprocess.run(
+            [executable, "plugin", "list", "--json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        payload = json.loads(completed.stdout) if completed.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return False
+    entries = payload.get("installed", []) if isinstance(payload, dict) else payload
+    if not isinstance(entries, list):
+        return False
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        identity = str(item.get("pluginId", item.get("id", item.get("name", ""))))
+        installed = item.get("installed", True)
+        enabled = item.get("enabled", True)
+        if "policy-research" in identity and installed is True and enabled is True:
+            return True
+    return False
 
 
 def run_doctor(client: ClientName | None = None) -> DoctorReport:
@@ -214,13 +258,16 @@ def run_doctor(client: ClientName | None = None) -> DoctorReport:
             (path for path in _registration_files(client) if _has_registration(path)),
             None,
         )
+        plugin_installed = _has_installed_plugin(client)
         checks.append(
             DoctorCheck(
                 "client_registration",
-                "ok" if registration else "error",
+                "ok" if registration or plugin_installed else "error",
                 (
                     f"Sourcebook registration found in {registration}"
                     if registration
+                    else "Sourcebook plugin is installed"
+                    if plugin_installed
                     else "Sourcebook registration was not found"
                 ),
             )

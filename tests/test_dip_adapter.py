@@ -208,13 +208,17 @@ async def test_modification_fetch_applies_an_explicit_overlap_window() -> None:
             http, api_key=API_KEY, include_positions=False, resolver=public_resolver
         ).fetch_modifications(
             datetime(2026, 9, 16, 12, 0, tzinfo=UTC),
+            until=datetime(2026, 9, 16, 13, 0, tzinfo=UTC),
             overlap=timedelta(minutes=15),
         )
 
     assert page.items == ()
     assert page.window_start == "2026-09-16T11:45:00+00:00"
     assert captured is not None
-    assert dict(captured.url.params) == {"f.aktualisiert.start": "2026-09-16T11:45:00+00:00"}
+    assert dict(captured.url.params) == {
+        "f.aktualisiert.start": "2026-09-16T11:45:00+00:00",
+        "f.aktualisiert.end": "2026-09-16T13:00:00+00:00",
+    }
 
 
 @pytest.mark.asyncio

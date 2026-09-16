@@ -71,7 +71,7 @@ def _mcp_server(command: str, profile: Profile, *, portable: bool) -> dict[str, 
 
 
 def _mcpb_manifest(profile: Profile, platform: str) -> dict[str, object]:
-    description = f"Local, read-only diagnostics for the {profile.value} research profile."
+    description = f"Local, read-only public-source tools for {profile.value} research."
     binary_name = "policy-mcp.exe" if platform == "win32" else "policy-mcp"
     entry_point = f"server/{binary_name}"
     return {
@@ -238,6 +238,7 @@ def build_packages(binary: Path, output: Path, *, target: str) -> PackageBuildRe
         raise FileNotFoundError(binary)
     platform, binary_name = TARGET_PLATFORMS[target]
     output.mkdir(parents=True, exist_ok=True)
+    _copy_binary(binary, output / "bin" / binary_name)
 
     bundles = {
         profile.value: _build_mcpb(

@@ -1,6 +1,6 @@
 # Operations
 
-Sourcebook starts from a failed-closed source registry. Research tools remain available so hosts can learn their stable contracts, but capability calls distinguish `not_configured`, `disabled`, `warming`, `schema_changed`, and `temporarily_unavailable` routes. An empty result never substitutes for one of those states. The current release does not bind live source workers, so changing registry state alone does not activate a route.
+Sourcebook starts from a failed-closed source registry. Research tools remain available so hosts can learn their stable contracts, but capability calls distinguish `not_configured`, `disabled`, `warming`, `schema_changed`, and `temporarily_unavailable` routes. An empty result never substitutes for one of those states. GovData catalogue search is available interactively without credentials. DIP has a bounded sync worker and becomes searchable after a successful credentialed sync. Changing registry state alone does not activate any other route.
 
 ## Preflight
 
@@ -15,13 +15,15 @@ uv run pytest
 
 `verify-schemas` validates the local registry only. It is not a live-source check. Each route may move to `healthy` only after its documented schema, fixture hash, host allowlist, credential transport, pagination behavior, limits, and low-volume live check are current.
 
+`route-health` reports those release gates. MCP capability calls also check local runtime state, such as whether a credentialed DIP sync has placed validated records in the index. A registry route can therefore have a healthy contract while the corresponding local capability remains `not_configured`.
+
 ## Credentials
 
 Store secrets with `policy-mcp configure --credential NAME`. The command writes through the operating-system credential store. Never put secrets in MCP arguments, registry files, URLs, fixture files, logs, or evaluation decisions. Rotate a credential by running the same command again, then run the source's low-volume authentication check before changing its registry state.
 
 ## Sync and backfill
 
-Use `policy-mcp sync --source SOURCE` for an incremental run and `policy-mcp backfill --source SOURCE --from-date YYYY-MM-DD --to-date YYYY-MM-DD` for a bounded historical window. These commands currently stop with `not_configured` until a live worker is bound; they never perform a crawl from an MCP request. Watermarks advance only after an entire window persists, and only one ingestion writer may run at a time.
+Use `policy-mcp sync --source dip` for an incremental DIP run and `policy-mcp backfill --source dip --from-date YYYY-MM-DD --to-date YYYY-MM-DD` for a bounded historical window. Store `DIP_API_KEY` first. Sources without a bound worker stop with `not_configured`; no MCP request starts a background crawl. DIP watermarks advance only after an entire window persists, and only one ingestion writer may run at a time.
 
 ## Backup and restore
 

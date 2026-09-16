@@ -2,6 +2,7 @@
 
 import json
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,44 @@ def test_package_command_builds_artifacts(tmp_path: Path) -> None:
     )
 
     assert (output / "claude-desktop" / "policy-legislation-0.1.0-darwin-arm64.mcpb").is_file()
+
+
+def test_setup_client_dry_run_is_machine_readable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    binary = tmp_path / "policy-mcp"
+    binary.write_text("binary")
+    monkeypatch.setattr("policy_mcp.client_setup.shutil.which", lambda _name: "/usr/bin/codex")
+    monkeypatch.setattr(
+        "policy_mcp.client_setup.subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0),
+    )
+
+    assert (
+        main(
+            [
+                "setup-client",
+                "--client",
+                "codex-cli",
+                "--executable",
+                str(binary),
+                "--dry-run",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "planned"
+    assert [step["profile"] for step in report["steps"]] == [
+        "legislation",
+        "actors",
+        "evidence",
+    ]
 
 
 def test_operator_can_verify_registry_and_back_up_state(

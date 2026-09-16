@@ -293,6 +293,7 @@ class DipClient:
         self,
         since: datetime,
         *,
+        until: datetime | None = None,
         overlap: timedelta,
         cursor: str | None = None,
     ) -> DipProcedurePage:
@@ -303,6 +304,12 @@ class DipClient:
             raise ValueError("DIP overlap must be between zero and seven days")
         window_start = (since - overlap).isoformat(timespec="seconds")
         parameters = {"f.aktualisiert.start": window_start}
+        if until is not None:
+            if until.tzinfo is None or until.utcoffset() is None:
+                raise ValueError("DIP modification timestamps must include a timezone")
+            if until < since:
+                raise ValueError("DIP modification end must not be before its start")
+            parameters["f.aktualisiert.end"] = until.isoformat(timespec="seconds")
         if cursor is not None:
             parameters["cursor"] = self._validate_cursor(cursor)
         page = await self._procedure_page(parameters)

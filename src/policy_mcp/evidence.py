@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Awaitable
+from datetime import UTC, datetime
 from decimal import Decimal
 from functools import reduce
 from operator import mul
 from pathlib import Path
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, Protocol, TypedDict
+from urllib.parse import quote
 
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
@@ -17,10 +20,13 @@ from pydantic import Field, model_validator
 from policy_mcp.contracts import tool_description
 from policy_mcp.evidence_models import (
     CatalogueDistribution,
+    CatalogueRecord,
+    CatalogueSearchPage,
     DatasetDescription,
     DatasetDimension,
     DimensionMember,
     NumericCell,
+    ProviderResponseError,
 )
 from policy_mcp.references import (
     MAX_SNAPSHOT_ITEMS,
@@ -73,6 +79,7 @@ class EvidenceError(StrictModel):
         "oversized",
         "double_counting",
         "incompatible_records",
+        "temporarily_unavailable",
     ]
     message: str
     retryable: bool = False
@@ -211,6 +218,16 @@ class CatalogueDetail(DetailBase):
 EvidenceDetail = (
     BudgetDetail | TedDetail | FundingCallDetail | FundedProjectDetail | CatalogueDetail
 )
+
+
+class GovDataService(Protocol):
+    """Interactive public GovData boundary used by the production server."""
+
+    def search(
+        self, query: str, *, limit: int = 5, start: int = 0
+    ) -> Awaitable[CatalogueSearchPage]: ...
+
+    def get(self, provider_id: str) -> Awaitable[CatalogueRecord]: ...
 
 
 class _DetailCommon(TypedDict):
@@ -436,6 +453,85 @@ def _fit(response: Any, field_name: str) -> Any:
     )
 
 
+def _govdata_official_url(provider_id: str) -> str:
+    encoded = quote(provider_id, safe="")
+    return f"https://www.govdata.de/ckan/api/3/action/package_show?id={encoded}"
+
+
+def _govdata_provenance(record: CatalogueRecord, retrieved_at: str) -> Provenance:
+    return Provenance(
+        source="govdata",
+        provider_id=record.provider_id,
+        official_url=_govdata_official_url(record.provider_id),
+        retrieved_at=retrieved_at,
+        source_modified_at=record.modified_at,
+    )
+
+
+def _govdata_coverage() -> Coverage:
+    return Coverage(
+        source="govdata",
+        jurisdiction=Jurisdiction.DE,
+        complete=False,
+        limitations=[
+            "GovData provides catalogue discovery. Listed distributions are not queried "
+            "by Sourcebook."
+        ],
+    )
+
+
+def _govdata_freshness(record: CatalogueRecord, retrieved_at: str) -> Freshness:
+    return Freshness(
+        source="govdata",
+        retrieved_at=retrieved_at,
+        indexed_at=retrieved_at,
+        source_modified_at=record.modified_at,
+    )
+
+
+def _govdata_card(
+    record: CatalogueRecord,
+    *,
+    retrieved_at: str,
+    reference_store: ReferenceStore,
+) -> EvidenceCard:
+    return EvidenceCard(
+        reference=reference_store.reference_for(
+            principal=reference_store.principal,
+            kind="catalogue",
+            key=f"govdata:{record.provider_id}",
+        ),
+        source="govdata",
+        kind="catalogue",
+        provider_id=record.provider_id,
+        title=record.title,
+        description=record.description or "",
+        official_url=_govdata_official_url(record.provider_id),
+        provenance=_govdata_provenance(record, retrieved_at),
+    )
+
+
+def _govdata_detail(
+    record: CatalogueRecord,
+    *,
+    token: str,
+    retrieved_at: str,
+) -> CatalogueDetail:
+    provenance = _govdata_provenance(record, retrieved_at)
+    return CatalogueDetail(
+        reference=token,
+        source="govdata",
+        provider_id=record.provider_id,
+        title=record.title,
+        description=record.description or "",
+        official_url=provenance.official_url,
+        provenance=provenance,
+        publisher=record.publisher or "Not stated by the provider",
+        licence=record.licence or "Not stated by the provider",
+        distributions=list(record.distributions),
+    )
+
+
 def _strict_tool_inputs(server: MCPServer[Any], names: list[str]) -> None:
     manager = server._tool_manager
     for name in names:
@@ -477,6 +573,8 @@ def register_evidence_tools(
     server: MCPServer[Any],
     catalog: FrozenEvidenceCatalog,
     reference_store: ReferenceStore,
+    *,
+    govdata_service: GovDataService | None = None,
 ) -> None:
     """Register the five stable evidence tools."""
     annotations = ToolAnnotations(
@@ -492,7 +590,7 @@ def register_evidence_tools(
         annotations=annotations,
         structured_output=True,
     )
-    def evidence_search(
+    async def evidence_search(
         query: Annotated[str, Field(min_length=1, max_length=300)],
         source: EvidenceSource | None = None,
         kind: EvidenceKind | None = None,
@@ -514,6 +612,114 @@ def register_evidence_tools(
             limit=limit,
             cursor=cursor,
         )
+        mentions_govdata = request.source == "govdata" or request.kind == "catalogue"
+        incompatible_govdata_filter = mentions_govdata and (
+            request.source not in (None, "govdata")
+            or request.kind not in (None, "catalogue")
+            or request.year is not None
+            or request.stage is not None
+            or request.flow is not None
+            or request.country is not None
+        )
+        if incompatible_govdata_filter:
+            return EvidenceSearchResponse(
+                status=ResearchStatus.ERROR,
+                error=_error(
+                    "unsupported",
+                    "GovData catalogue search does not support the supplied source or filters.",
+                ),
+            )
+        use_live_govdata = govdata_service is not None and (
+            request.source == "govdata"
+            or request.kind == "catalogue"
+            or (
+                request.source is None
+                and request.kind is None
+                and not catalog.ready_sources
+                and request.year is None
+                and request.stage is None
+                and request.flow is None
+                and request.country is None
+            )
+        )
+        if use_live_govdata:
+            assert govdata_service is not None
+            digest = _hash(request.model_dump(mode="json", exclude={"cursor"}))
+            try:
+                if request.cursor is None:
+                    snapshot_records: list[CatalogueRecord] = []
+                    start = 0
+                    for _ in range(6):
+                        provider_page = await govdata_service.search(
+                            request.query,
+                            limit=10,
+                            start=start,
+                        )
+                        snapshot_records.extend(
+                            record.model_copy(update={"distributions": ()})
+                            for record in provider_page.items
+                        )
+                        if provider_page.next_start is None:
+                            break
+                        if provider_page.next_start <= start:
+                            raise ProviderResponseError("GovData pagination did not make progress")
+                        start = provider_page.next_start
+                    snapshot_items = [record.model_dump_json() for record in snapshot_records]
+                    cursor_page = reference_store.first_page(
+                        snapshot_items,
+                        principal=reference_store.principal,
+                        query_hash=digest,
+                        limit=request.limit,
+                    )
+                else:
+                    cursor_page = reference_store.next_page(
+                        request.cursor,
+                        principal=reference_store.principal,
+                        query_hash=digest,
+                        limit=request.limit,
+                    )
+            except ForgedCursorError:
+                return EvidenceSearchResponse(
+                    status=ResearchStatus.ERROR,
+                    error=_error("forged_cursor", "The cursor does not belong to this search."),
+                )
+            except ExpiredCursorError:
+                return EvidenceSearchResponse(
+                    status=ResearchStatus.ERROR,
+                    error=_error(
+                        "expired_cursor",
+                        "The cursor expired. Restart the search.",
+                        retryable=True,
+                    ),
+                )
+            except (ProviderResponseError, OSError, ValueError):
+                return EvidenceSearchResponse(
+                    status=ResearchStatus.ERROR,
+                    error=_error(
+                        "temporarily_unavailable",
+                        "GovData could not be reached. Try again later.",
+                        retryable=True,
+                    ),
+                )
+            retrieved_at = datetime.now(UTC).isoformat()
+            records = [CatalogueRecord.model_validate_json(item) for item in cursor_page.keys]
+            cards = [
+                _govdata_card(
+                    record,
+                    retrieved_at=retrieved_at,
+                    reference_store=reference_store,
+                )
+                for record in records
+            ]
+            response = EvidenceSearchResponse(
+                status=ResearchStatus.OK,
+                items=cards,
+                continuation=_continuation(cursor_page.cursor, cursor_page.expires_at),
+                coverage=[_govdata_coverage()],
+                freshness=[_govdata_freshness(record, retrieved_at) for record in records],
+                provenance=[card.provenance for card in cards],
+            )
+            return _fit(response, "items")
         if not catalog.ready_sources or (
             request.source is not None and request.source not in catalog.ready_sources
         ):
@@ -823,7 +1029,7 @@ def register_evidence_tools(
         annotations=annotations,
         structured_output=True,
     )
-    def evidence_get(
+    async def evidence_get(
         reference: Annotated[str, Field(min_length=12, max_length=200)],
     ) -> EvidenceGetResponse:
         request = GetInput(reference=reference)
@@ -846,6 +1052,36 @@ def register_evidence_tools(
             return EvidenceGetResponse(
                 status=ResearchStatus.ERROR,
                 error=_error("forged_reference", "The evidence reference is invalid."),
+            )
+        if key.startswith("govdata:") and govdata_service is not None:
+            try:
+                live_record = await govdata_service.get(key.removeprefix("govdata:"))
+            except (ProviderResponseError, OSError, ValueError):
+                return EvidenceGetResponse(
+                    status=ResearchStatus.ERROR,
+                    error=_error(
+                        "temporarily_unavailable",
+                        "GovData could not be reached. Try again later.",
+                        retryable=True,
+                    ),
+                )
+            retrieved_at = datetime.now(UTC).isoformat()
+            provenance = _govdata_provenance(live_record, retrieved_at)
+            response = EvidenceGetResponse(
+                status=ResearchStatus.OK,
+                record=_govdata_detail(
+                    live_record,
+                    token=request.reference,
+                    retrieved_at=retrieved_at,
+                ),
+                coverage=[_govdata_coverage()],
+                freshness=[_govdata_freshness(live_record, retrieved_at)],
+                provenance=[provenance],
+            )
+            return fit_response(
+                response,
+                [],
+                oversized_error=_error("oversized", "The selected evidence record is too large."),
             )
         record = catalog.record(key)
         if record is None:
@@ -913,8 +1149,16 @@ def register_evidence_tools(
             ),
             EvidenceCapability(
                 route="govdata.catalogue",
-                state="ready" if "govdata" in catalog.ready_sources else "not_configured",
-                operations=["search", "get"] if "govdata" in catalog.ready_sources else [],
+                state=(
+                    "ready"
+                    if "govdata" in catalog.ready_sources or govdata_service is not None
+                    else "not_configured"
+                ),
+                operations=(
+                    ["search", "get"]
+                    if "govdata" in catalog.ready_sources or govdata_service is not None
+                    else []
+                ),
             ),
             EvidenceCapability(
                 route="govdata.distribution_query",

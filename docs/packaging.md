@@ -35,6 +35,7 @@ The output contains:
 
 ```text
 dist/packages/
+  bin/policy-mcp
   claude-desktop/*.mcpb
   claude-code-plugin/policy-research/
   openai-agent-plugin/policy-research/
@@ -78,6 +79,23 @@ npx --yes @anthropic-ai/mcpb validate path/to/extracted/manifest.json
 ## Development registration
 
 Direct registration remains a support path. It does not replace package testing.
+
+Register all three profiles with one command:
+
+```bash
+./dist/packages/bin/policy-mcp setup-client --client claude-code
+./dist/packages/bin/policy-mcp setup-client --client codex-cli
+```
+
+Add `--dry-run` to preview the host commands without changing client settings. Run the matching
+doctor check after restarting the client:
+
+```bash
+./dist/packages/bin/policy-mcp doctor --client claude-code
+./dist/packages/bin/policy-mcp doctor --client codex-cli
+```
+
+To register one profile instead, call the host command directly:
 
 ```bash
 claude mcp add --transport stdio --scope user policy-legislation -- \

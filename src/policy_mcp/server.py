@@ -6,6 +6,7 @@ from mcp.server.mcpserver import MCPServer
 
 from policy_mcp import __version__
 from policy_mcp.actors import FrozenActorCatalog, register_actor_tools
+from policy_mcp.adapters.govdata import LiveGovDataService
 from policy_mcp.evidence import FrozenEvidenceCatalog, register_evidence_tools
 from policy_mcp.legislation import FrozenLegislationCatalog, register_legislation_tools
 from policy_mcp.profiles import Profile
@@ -32,7 +33,7 @@ def create_server(
     if selected == Profile.LEGISLATION:
         register_legislation_tools(
             server,
-            legislation_catalog or FrozenLegislationCatalog.empty(),
+            legislation_catalog or FrozenLegislationCatalog.from_database(),
             SQLiteReferenceStore(principal=principal),
         )
         return server
@@ -48,6 +49,7 @@ def create_server(
             server,
             FrozenEvidenceCatalog.empty(),
             SQLiteReferenceStore(principal=principal),
+            govdata_service=LiveGovDataService(),
         )
         return server
 

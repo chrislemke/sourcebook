@@ -59,6 +59,7 @@ async def capture_contract(
 def package_binaries(packages: Path, profile: Profile, extracted: Path) -> list[Path]:
     binary_name = "policy-mcp.exe" if TARGET == "windows-x64" else "policy-mcp"
     candidates = [
+        packages / "bin" / binary_name,
         packages / "claude-code-plugin" / "policy-research" / "bin" / binary_name,
         packages / "openai-agent-plugin" / "policy-research" / "bin" / binary_name,
     ]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -50,6 +51,7 @@ from policy_mcp.research_contracts import (
     StrictModel,
     fit_response,
 )
+from policy_mcp.storage import open_database
 
 
 class _Event(StrictModel):
@@ -122,10 +124,90 @@ class FrozenLegislationCatalog:
             *[document.source for document in self._documents.values()],
         }
 
+    @property
+    def searchable_sources(self) -> set[str]:
+        """Return sources with at least one validated searchable record."""
+        return {record.source for record in self._records.values()}
+
+    def available_operations(self, source: str) -> list[str]:
+        """Derive only operations supported by validated local entities."""
+        records = [record for record in self._records.values() if record.source == source]
+        has_documents = any(document.source == source for document in self._documents.values())
+        if source == "dip":
+            operations = ["search", "procedure"] if records else []
+        elif source == "cellar":
+            operations = ["identifier_lookup"] if records else []
+        else:
+            operations = []
+        if has_documents:
+            operations.append("read")
+        return operations
+
     @classmethod
     def from_json(cls, path: Path) -> FrozenLegislationCatalog:
         """Load one frozen catalog fixture."""
         return cls(_Fixture.model_validate_json(path.read_text()))
+
+    @classmethod
+    def from_database(cls) -> FrozenLegislationCatalog:
+        """Load the latest validated legislation versions from healthy local sources."""
+        with open_database() as connection:
+            return cls._from_connection(connection)
+
+    @classmethod
+    def _from_connection(cls, connection: sqlite3.Connection) -> FrozenLegislationCatalog:
+        rows = connection.execute(
+            """
+            WITH latest_versions AS (
+                SELECT
+                    records.source_id,
+                    records.entity_kind,
+                    record_versions.payload_json,
+                    record_versions.retrieved_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY records.id
+                        ORDER BY
+                            record_versions.source_timestamp DESC,
+                            record_versions.id DESC
+                    ) AS version_rank
+                FROM records
+                JOIN sources ON sources.source_id = records.source_id
+                JOIN record_versions ON record_versions.record_id = records.id
+                WHERE sources.status = 'healthy'
+                  AND records.entity_kind IN ('procedure', 'legal_text', 'document')
+            )
+            SELECT source_id, entity_kind, payload_json, retrieved_at
+            FROM latest_versions
+            WHERE version_rank = 1
+            ORDER BY source_id, entity_kind
+            """
+        ).fetchall()
+        records: list[_Record] = []
+        documents: list[_Document] = []
+        retrieved_at = ""
+        for source_id, entity_kind, payload_json, row_retrieved_at in rows:
+            try:
+                payload = json.loads(payload_json)
+                if not isinstance(payload, dict) or payload.get("source") != source_id:
+                    continue
+                if entity_kind == "document":
+                    documents.append(_Document.model_validate(payload))
+                else:
+                    record = _Record.model_validate(payload)
+                    if record.kind != entity_kind:
+                        continue
+                    records.append(record)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+            retrieved_at = max(retrieved_at, str(row_retrieved_at))
+        return cls(
+            _Fixture(
+                retrieved_at=retrieved_at,
+                indexed_at=retrieved_at,
+                records=records,
+                documents=documents,
+            )
+        )
 
     def search(self, request: SearchInput) -> list[_Record]:
         """Search only capabilities supported by the frozen local index."""
@@ -291,7 +373,7 @@ def register_legislation_tools(
         expected_source = request.source or (
             "dip" if request.jurisdiction == Jurisdiction.DE else "cellar"
         )
-        if expected_source not in catalog.ready_sources:
+        if expected_source not in catalog.searchable_sources:
             return _source_error(
                 "not_configured",
                 f"Source {expected_source} has not passed its ingestion gate.",
@@ -586,23 +668,21 @@ def register_legislation_tools(
         source: Literal["dip", "ep", "cellar", "eurlex"] | None = None,
     ) -> CapabilitiesResponse:
         request = CapabilitiesInput(jurisdiction=jurisdiction, source=source)
+        dip_operations = catalog.available_operations("dip")
+        cellar_operations = catalog.available_operations("cellar")
         capabilities = [
             SourceCapability(
                 source="dip",
                 jurisdiction=Jurisdiction.DE,
-                state="ready" if "dip" in catalog.ready_sources else "not_configured",
-                operations=(
-                    ["search", "procedure", "read"] if "dip" in catalog.ready_sources else []
-                ),
+                state="ready" if dip_operations else "not_configured",
+                operations=dip_operations,
                 limitations=["The local index is not a complete historical backfill."],
             ),
             SourceCapability(
                 source="cellar",
                 jurisdiction=Jurisdiction.EU,
-                state="ready" if "cellar" in catalog.ready_sources else "not_configured",
-                operations=(
-                    ["identifier_lookup", "read"] if "cellar" in catalog.ready_sources else []
-                ),
+                state="ready" if cellar_operations else "not_configured",
+                operations=cellar_operations,
                 limitations=["Identifier retrieval is not full-text EUR-Lex search."],
             ),
             SourceCapability(

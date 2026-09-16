@@ -119,3 +119,22 @@ class GovDataClient:
             licence=(value.get("license_id") if isinstance(value.get("license_id"), str) else None),
             distributions=tuple(distributions),
         )
+
+
+class LiveGovDataService:
+    """Open a short-lived bounded client for each interactive GovData request."""
+
+    def __init__(self, *, timeout_seconds: float = 20.0) -> None:
+        if timeout_seconds <= 0:
+            raise ValueError("GovData timeout must be positive")
+        self._timeout = httpx.Timeout(timeout_seconds, connect=min(timeout_seconds, 5.0))
+
+    async def search(self, query: str, *, limit: int = 5, start: int = 0) -> CatalogueSearchPage:
+        """Search GovData without keeping a network client alive between MCP calls."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            return await GovDataClient(client).search(query, limit=limit, start=start)
+
+    async def get(self, provider_id: str) -> CatalogueRecord:
+        """Read one selected GovData package."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            return await GovDataClient(client).get(provider_id)

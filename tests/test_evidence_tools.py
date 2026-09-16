@@ -10,6 +10,12 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from policy_mcp.evidence import FrozenEvidenceCatalog, register_evidence_tools
+from policy_mcp.evidence_models import (
+    CatalogueDistribution,
+    CatalogueRecord,
+    CatalogueSearchPage,
+    ProviderResponseError,
+)
 from policy_mcp.references import InMemoryReferenceStore
 
 FIXTURE = Path(__file__).parent / "fixtures" / "evidence" / "catalog.json"
@@ -21,6 +27,57 @@ def build_server() -> MCPServer[None]:
         server,
         FrozenEvidenceCatalog.from_json(FIXTURE),
         InMemoryReferenceStore(principal="evidence-test-principal"),
+    )
+    return server
+
+
+class _LiveGovData:
+    def __init__(self) -> None:
+        self.starts: list[int] = []
+
+    async def search(self, query: str, *, limit: int = 5, start: int = 0) -> CatalogueSearchPage:
+        self.starts.append(start)
+        records = tuple(
+            CatalogueRecord(
+                provider_id=f"{query}-{index}",
+                title=f"Official {query} data {index}",
+                description="Public catalogue metadata",
+                publisher="Example authority",
+                modified_at="2026-09-15T10:30:00+00:00",
+                licence="dl-de/by-2-0",
+                distributions=(
+                    CatalogueDistribution(
+                        provider_id=f"csv-{index}",
+                        title="CSV",
+                        url="https://example.gov/data.csv",
+                        format="CSV",
+                    ),
+                ),
+            )
+            for index in range(start, min(start + limit, 3))
+        )
+        return CatalogueSearchPage(
+            items=records,
+            total=3,
+            next_start=start + len(records) if start + len(records) < 3 else None,
+        )
+
+    async def get(self, provider_id: str) -> CatalogueRecord:
+        return CatalogueRecord(
+            provider_id=provider_id,
+            title="Selected official data",
+            publisher="Example authority",
+            licence="dl-de/by-2-0",
+        )
+
+
+def build_live_govdata_server(service: _LiveGovData) -> MCPServer[None]:
+    server: MCPServer[None] = MCPServer(name="policy-evidence")
+    register_evidence_tools(
+        server,
+        FrozenEvidenceCatalog.empty(),
+        InMemoryReferenceStore(principal="live-govdata-test"),
+        govdata_service=service,
     )
     return server
 
@@ -99,6 +156,133 @@ async def test_contract_and_genesis_search_describe_query_path() -> None:
     assert {"-", "x"}.issubset(symbols)
     assert result["provenance"][0]["source"] == "genesis"
     assert result["coverage"][0]["complete"] is False
+
+
+async def test_live_govdata_search_paginates_and_selected_record_can_be_read() -> None:
+    service = _LiveGovData()
+    server = build_live_govdata_server(service)
+
+    first = data(
+        await server.call_tool(
+            "evidence_search",
+            {"query": "energy", "source": "govdata", "kind": "catalogue", "limit": 2},
+        )
+    )
+    assert [item["provider_id"] for item in first["items"]] == ["energy-0", "energy-1"]
+    assert first["coverage"][0]["complete"] is False
+    selected = data(
+        await server.call_tool("evidence_get", {"reference": first["items"][0]["reference"]})
+    )
+    assert selected["record"]["provider_id"] == "energy-0"
+    assert selected["record"]["kind"] == "catalogue"
+
+    changed_limit = data(
+        await server.call_tool(
+            "evidence_search",
+            {
+                "query": "energy",
+                "source": "govdata",
+                "kind": "catalogue",
+                "limit": 1,
+                "cursor": first["continuation"]["cursor"],
+            },
+        )
+    )
+    assert changed_limit["error"]["code"] == "forged_cursor"
+
+    second = data(
+        await server.call_tool(
+            "evidence_search",
+            {
+                "query": "energy",
+                "source": "govdata",
+                "kind": "catalogue",
+                "limit": 2,
+                "cursor": first["continuation"]["cursor"],
+            },
+        )
+    )
+    assert [item["provider_id"] for item in second["items"]] == ["energy-2"]
+    assert service.starts == [0]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"source": "genesis", "kind": "catalogue"},
+        {"source": "govdata", "kind": "budget"},
+        {"source": "govdata", "year": 2026},
+    ],
+)
+async def test_live_govdata_rejects_incompatible_filters(arguments: dict[str, Any]) -> None:
+    service = _LiveGovData()
+    server = build_live_govdata_server(service)
+
+    response = data(await server.call_tool("evidence_search", {"query": "energy", **arguments}))
+
+    assert response["error"]["code"] == "unsupported"
+    assert service.starts == []
+
+
+async def test_live_govdata_failure_is_retryable_and_redacted() -> None:
+    class _Unavailable(_LiveGovData):
+        async def search(
+            self, query: str, *, limit: int = 5, start: int = 0
+        ) -> CatalogueSearchPage:
+            del query, limit, start
+            raise ProviderResponseError("secret provider response")
+
+    server = build_live_govdata_server(_Unavailable())
+
+    response = data(
+        await server.call_tool("evidence_search", {"query": "energy", "source": "govdata"})
+    )
+
+    assert response["error"]["code"] == "temporarily_unavailable"
+    assert response["error"]["retryable"] is True
+    assert "secret" not in response["error"]["message"]
+
+
+async def test_live_govdata_follows_provider_offsets_and_snapshots_results() -> None:
+    class _ShortPages(_LiveGovData):
+        async def search(
+            self, query: str, *, limit: int = 5, start: int = 0
+        ) -> CatalogueSearchPage:
+            del limit
+            self.starts.append(start)
+            record = CatalogueRecord(
+                provider_id=f"{query}-{start}",
+                title=f"Record {start}",
+            )
+            return CatalogueSearchPage(
+                items=(record,),
+                total=3,
+                next_start=start + 1 if start < 2 else None,
+            )
+
+    service = _ShortPages()
+    server = build_live_govdata_server(service)
+    first = data(
+        await server.call_tool(
+            "evidence_search",
+            {"query": "energy", "source": "govdata", "limit": 2},
+        )
+    )
+    second = data(
+        await server.call_tool(
+            "evidence_search",
+            {
+                "query": "energy",
+                "source": "govdata",
+                "limit": 2,
+                "cursor": first["continuation"]["cursor"],
+            },
+        )
+    )
+
+    assert [item["provider_id"] for item in first["items"]] == ["energy-0", "energy-1"]
+    assert [item["provider_id"] for item in second["items"]] == ["energy-2"]
+    assert service.starts == [0, 1, 2]
 
 
 @pytest.mark.parametrize(

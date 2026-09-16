@@ -1,67 +1,238 @@
 # Sourcebook
 
-Local, read-only MCP servers for traceable research across German federal and EU public sources. The implementation follows the repository's implementation plan and is split into legislation, actors, and evidence profiles.
+Sourcebook adds read-only German federal and EU research tools to Claude and Codex. It can search public-source metadata, return compact records, and keep links and source dates attached to the result.
 
-## Development setup
+You do not need to run a server yourself. After installation, the desktop app or command-line client starts Sourcebook when it needs it.
 
-The project targets Python 3.12 and uses uv for Python installation, dependency resolution, and command execution.
+> The product names used below are **Claude Code** and **Codex CLI**. These are sometimes mistyped as “Cloud Code” and “Codec CLI.”
+
+## What works immediately
+
+- GovData catalogue search works without an account or API key.
+- German Bundestag DIP procedure search works after you add a free DIP API key and run the first sync.
+- Claude Desktop, Claude Code, the ChatGPT desktop app, and Codex CLI all use the same local, read-only program.
+- Sourcebook stores its index and credentials outside the installed package, so updates do not remove them.
+
+Sources that have not been configured are shown as unavailable. Sourcebook does not turn a missing source into an empty search result.
+
+## Build targets and release status
+
+The package builder currently targets:
+
+- Apple Silicon Macs, such as M1, M2, M3, and M4 Macs
+- 64-bit Windows computers
+
+Intel Macs and Linux are not packaged yet. Developers can still run the Python project directly with Python 3.12.
+
+The packages built from this checkout are development artifacts. The macOS binary is ad-hoc signed rather than notarized, and the Windows binary is not Authenticode-signed. Gatekeeper or SmartScreen may therefore block it. A normal public release still needs platform signing and an interactive installation check in each desktop app.
+
+## Prepare the package
+
+If someone gave you a prepared `dist/packages` folder, skip to the section for your app.
+
+To build it from this repository, first install [uv](https://docs.astral.sh/uv/getting-started/installation/). Then open a terminal in this folder and run:
 
 ```bash
-uv sync
-uv run policy-mcp --version
+uv sync --locked
+uv run pyinstaller --noconfirm --clean policy-mcp.spec
 ```
 
-Run the local quality checks with:
+On an Apple Silicon Mac, finish with:
 
 ```bash
-uv run ruff format --check .
-uv run ruff check .
-uv run ty check
-uv run pytest
-```
-
-Use `uv build` to verify the Python package. The commands below build the self-contained client executable and plugin artifacts.
-
-## Local MCP runtime
-
-Start one profile over `stdio`:
-
-```bash
-uv run policy-mcp serve --profile legislation
-uv run policy-mcp serve --profile actors
-uv run policy-mcp serve --profile evidence
-```
-
-The legislation profile exposes six task-oriented tools, the actor profile four, and the evidence profile five. All are read-only. No live source workers are bound yet, so the production server fails closed with `not_configured` source states; deterministic frozen catalogs are used only by acceptance tests. Set `POLICY_MCP_DATA_DIR` only for development or tests; normal runs use the operating system's user-data directory.
-
-Run operator checks or store an upstream credential with:
-
-```bash
-uv run policy-mcp doctor
-uv run policy-mcp doctor --client codex-cli
-uv run policy-mcp configure --credential DIP_API_KEY
-uv run policy-mcp verify-schemas
-uv run policy-mcp route-health
-uv run policy-mcp measure-tool-tokens --profile legislation
-```
-
-`doctor` never reads or prints credential values. `configure` writes the prompted value to the operating system credential store.
-
-## Client packages
-
-Build a native executable, then generate all package families from that one binary:
-
-```bash
-PYINSTALLER_CONFIG_DIR=/tmp/sourcebook-pyinstaller uv run pyinstaller --noconfirm --clean policy-mcp.spec
 uv run policy-mcp package --binary dist/policy-mcp --output dist/packages --target darwin-arm64
 ```
 
-The package command creates three Claude Desktop MCPBs, one Claude Code plugin, one portable OpenAI Agent Plugin, and local marketplace trees. See [docs/packaging.md](docs/packaging.md) for validation and installation details.
+On Windows, finish with:
 
-Backup, staged restore, bounded backfill gates, routing evaluation, and route-state interpretation are documented in [docs/operations.md](docs/operations.md).
+```powershell
+uv run policy-mcp package --binary dist/policy-mcp.exe --output dist/packages --target windows-x64
+```
 
-## Current status
+The `dist/packages` folder now contains the client packages and a standalone executable in `dist/packages/bin`.
 
-The local runtime now provides stable legislation, actor, and evidence contracts; durable opaque references; bounded response envelopes; a versioned SQLite/FTS store; content-addressed documents; strict source registry and networking policy; DIP, EP/CELLAR, Bundestag-record, GENESIS, and GovData adapter contracts; and operator backup, restore, routing-evaluation, and health commands. Frozen MCP fixtures verify complete search-to-evidence paths without network access.
+For the commands below, set these paths once. On macOS:
 
-Live source activation and worker binding remain. The registry currently reports routes as `not_configured` until credentials, current schema fixtures, distribution URLs, and low-volume live checks have passed. Signed macOS and Windows release checks, plus the Claude Desktop and ChatGPT Desktop installation dialogs, still require release credentials or interactive host validation.
+```bash
+SOURCEBOOK="$PWD/dist/packages/bin/policy-mcp"
+CLAUDE_MARKETPLACE="$PWD/dist/packages/marketplaces/claude"
+OPENAI_MARKETPLACE="$PWD/dist/packages/marketplaces/openai"
+```
+
+On Windows PowerShell:
+
+```powershell
+$Sourcebook = (Resolve-Path ".\dist\packages\bin\policy-mcp.exe").Path
+$ClaudeMarketplace = (Resolve-Path ".\dist\packages\marketplaces\claude").Path
+$OpenAIMarketplace = (Resolve-Path ".\dist\packages\marketplaces\openai").Path
+```
+
+## Claude Desktop
+
+Claude Desktop uses three small extension files. Installing all three gives you the complete tool set; you can install only the areas you need if you prefer.
+
+1. Open Claude Desktop.
+2. Open **Settings → Extensions → Advanced settings**.
+3. In **Extension Developer**, choose **Install Extension…**.
+4. Open `dist/packages/claude-desktop` and install each `.mcpb` file:
+   - `policy-legislation-…mcpb`
+   - `policy-actors-…mcpb`
+   - `policy-evidence-…mcpb`
+5. Start a new conversation. If the tools do not appear, quit and reopen Claude Desktop.
+
+Anthropic also documents this flow in its [Claude Desktop extension guide](https://support.claude.com/en/articles/10949351-getting-started-with-local-mcp-servers-on-claude-desktop).
+
+## Claude Code
+
+Install [Claude Code](https://code.claude.com/docs/en/setup) first if the `claude` command is not available. Then run:
+
+```bash
+claude plugin marketplace add "$CLAUDE_MARKETPLACE" --scope user
+claude plugin install policy-research@policy-tools --scope user
+```
+
+On Windows PowerShell, use:
+
+```powershell
+claude plugin marketplace add "$ClaudeMarketplace" --scope user
+claude plugin install policy-research@policy-tools --scope user
+```
+
+Start Claude Code again. Run `/plugin`, open **Installed**, and confirm that `policy-research` is enabled. Claude Code’s [plugin guide](https://code.claude.com/docs/en/discover-plugins) explains the same marketplace process.
+
+If plugin installation is unavailable, direct registration is the fallback:
+
+```bash
+"$SOURCEBOOK" setup-client --client claude-code
+```
+
+On Windows PowerShell, use `& $Sourcebook setup-client --client claude-code`. Direct registration saves this exact path, so do not move or delete the executable afterward.
+
+## ChatGPT desktop app
+
+This path requires a ChatGPT desktop version that shows local Plugins or MCP server settings. Local `stdio` support remains host-version-specific and still needs an interactive release check.
+
+If [Codex CLI](https://learn.chatgpt.com/docs/codex/cli) is installed, add the local plugin with:
+
+```bash
+codex plugin marketplace add "$OPENAI_MARKETPLACE"
+codex plugin add policy-research@policy-tools
+```
+
+On Windows PowerShell, use:
+
+```powershell
+codex plugin marketplace add "$OpenAIMarketplace"
+codex plugin add policy-research@policy-tools
+```
+
+Quit and reopen the ChatGPT desktop app, then start a new task. Open the Plugins area and confirm that **Sourcebook** is enabled.
+
+If you do not have Codex CLI, add the servers in the app itself:
+
+1. Open **Settings → MCP servers**.
+2. Choose **Add server** and select **STDIO**.
+3. Add `policy-legislation` with this command and these arguments:
+
+   ```text
+   /absolute/path/to/policy-mcp serve --profile legislation
+   ```
+
+4. Repeat for `policy-actors` with `--profile actors` and `policy-evidence` with `--profile evidence`.
+5. Save, choose **Restart**, and start a new task.
+
+Use the real full path to the executable. The [OpenAI MCP guide](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) also shows the desktop settings flow.
+
+## Codex CLI
+
+Install [Codex CLI](https://learn.chatgpt.com/docs/codex/cli) first if the `codex` command is not available. Then use the same OpenAI plugin package as the ChatGPT desktop app:
+
+```bash
+codex plugin marketplace add "$OPENAI_MARKETPLACE"
+codex plugin add policy-research@policy-tools
+```
+
+On Windows PowerShell, use:
+
+```powershell
+codex plugin marketplace add "$OpenAIMarketplace"
+codex plugin add policy-research@policy-tools
+```
+
+Start a new `codex` session and run `/plugins` to confirm that Sourcebook is installed.
+
+If plugins are unavailable, use direct registration:
+
+```bash
+"$SOURCEBOOK" setup-client --client codex-cli
+```
+
+On Windows PowerShell, use `& $Sourcebook setup-client --client codex-cli`. Direct registration saves this exact path, so do not move or delete the executable afterward. You can check the registrations with `codex mcp list`. OpenAI’s [MCP documentation](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) describes these shared CLI and desktop settings.
+
+## First use
+
+GovData needs no setup. Try this in any connected client:
+
+> Search GovData for official datasets about the federal budget. Return the title, publisher, licence, and official link for the three best matches.
+
+For German legislative procedures, get a free API key from the [Bundestag DIP API page](https://dip.bundestag.de/%C3%BCber-dip/hilfe/api). Store it and download the most recent changes:
+
+```bash
+"$SOURCEBOOK" configure --credential DIP_API_KEY
+"$SOURCEBOOK" sync --source dip
+```
+
+On Windows PowerShell, run `& $Sourcebook configure --credential DIP_API_KEY`, followed by `& $Sourcebook sync --source dip`.
+
+The key is entered in a hidden prompt and stored in your operating system’s credential store. It is not written to the MCP configuration. The first sync covers changes published during the previous day; use a bounded `backfill` for older dates. Sourcebook does not schedule refreshes, so run `sync` again when you want newer records. Restart the connected app after a sync so that it opens the updated local index.
+
+For example, to add one older day on macOS:
+
+```bash
+"$SOURCEBOOK" backfill --source dip --from-date 2026-09-01 --to-date 2026-09-01
+```
+
+On Windows PowerShell, start the command with `& $Sourcebook` and use the same arguments. Choose dates that matter to your research; bounded windows keep provider requests predictable.
+
+Then try:
+
+> Search the locally synchronized German federal legislative procedures for a topic that changed recently. Show the recorded status, timeline, and official source links.
+
+## Check that setup worked
+
+Run the check that matches your client:
+
+```bash
+"$SOURCEBOOK" doctor --client claude-code
+"$SOURCEBOOK" doctor --client codex-cli
+```
+
+On Windows PowerShell, use `& $Sourcebook doctor --client claude-code` or `& $Sourcebook doctor --client codex-cli`.
+
+For a general check, run:
+
+```bash
+"$SOURCEBOOK" doctor
+```
+
+On Windows PowerShell, use `& $Sourcebook doctor`.
+
+Warnings about sources without credentials are normal. An `ERROR` line means that the program, data folder, database, or selected client registration needs attention.
+
+## Updating or removing Sourcebook
+
+Rebuild or replace the package first, then update the client:
+
+- Claude Desktop: remove the old extensions in **Settings → Extensions**, then install the new `.mcpb` files.
+- Claude Code: run `claude plugin update policy-research@policy-tools --scope user` after refreshing the marketplace, or uninstall and install it again.
+- Codex and ChatGPT desktop: rebuild the local package, run `codex plugin remove policy-research@policy-tools`, then run `codex plugin add policy-research@policy-tools` again. The marketplace stays configured.
+
+Removing a plugin does not remove Sourcebook’s local index or stored API keys.
+
+## Privacy and limits
+
+Sourcebook runs on your computer and exposes read-only research tools. It does not change public records or contact anyone. It stores a local search index, source metadata, and any documents that a configured source worker downloads.
+
+GovData is catalogue discovery only: Sourcebook lists distributions but does not execute arbitrary files or queries from them. DIP coverage starts with the time windows you sync; it is not automatically a complete historical archive. Other planned source routes remain visibly unavailable until their individual contract and live-data checks pass.
+
+Maintainer details are in [docs/packaging.md](docs/packaging.md) and [docs/operations.md](docs/operations.md).

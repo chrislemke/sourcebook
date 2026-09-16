@@ -5,13 +5,25 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
 from collections.abc import Sequence
-from datetime import date
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 
+import httpx
+
 from policy_mcp import __version__
-from policy_mcp.diagnostics import CLIENT_NAMES, CREDENTIAL_NAMES, run_doctor, store_credential
+from policy_mcp.adapters.dip import DipClient, DipProviderError
+from policy_mcp.client_setup import SETUP_CLIENTS, setup_client
+from policy_mcp.diagnostics import (
+    CLIENT_NAMES,
+    CREDENTIAL_NAMES,
+    load_credential,
+    run_doctor,
+    store_credential,
+)
 from policy_mcp.evaluation import RoutingDecision, load_corpus, run_evaluation
+from policy_mcp.ingestion import sync_dip_window
 from policy_mcp.operations import (
     backup_state,
     restore_state,
@@ -23,6 +35,7 @@ from policy_mcp.profiles import Profile
 from policy_mcp.registry import RouteState, load_registry
 from policy_mcp.resources import bundled_resource
 from policy_mcp.server import create_server
+from policy_mcp.storage import open_database
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -49,6 +62,23 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--format", choices=("text", "json"), default="text")
     configure = subparsers.add_parser("configure", help="Store one upstream credential securely.")
     configure.add_argument("--credential", choices=CREDENTIAL_NAMES, required=True)
+    setup = subparsers.add_parser(
+        "setup-client",
+        help="Register all three servers with Claude Code or Codex CLI.",
+    )
+    setup.add_argument("--client", choices=SETUP_CLIENTS, required=True)
+    setup.add_argument(
+        "--executable",
+        type=Path,
+        default=None,
+        help="Sourcebook executable to register (defaults to this executable).",
+    )
+    setup.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show the registration plan without changing client settings.",
+    )
+    setup.add_argument("--format", choices=("text", "json"), default="text")
     verify = subparsers.add_parser("verify-schemas", help="Validate the source registry.")
     verify.add_argument(
         "--registry",
@@ -130,6 +160,48 @@ async def _tool_measurement(profile: str) -> dict[str, object]:
     }
 
 
+def _dip_incremental_start(now: datetime) -> datetime:
+    with open_database() as connection:
+        row = connection.execute(
+            "SELECT completed_watermark FROM sync_state WHERE source_id = 'dip'"
+        ).fetchone()
+    if row is None or row[0] is None:
+        return now - timedelta(days=1)
+    return datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+
+
+async def _run_dip_sync(
+    since: datetime,
+    until: datetime,
+    *,
+    api_key: str | None = None,
+) -> tuple[int, dict[str, object]]:
+    api_key = api_key or load_credential("DIP_API_KEY")
+    if api_key is None:
+        return 2, {
+            "status": "not_configured",
+            "source": "dip",
+            "detail": "Store DIP_API_KEY with policy-mcp configure before syncing.",
+        }
+    try:
+        timeout = httpx.Timeout(30.0, connect=5.0)
+        async with httpx.AsyncClient(timeout=timeout) as http:
+            report = await sync_dip_window(
+                DipClient(http, api_key=api_key),
+                since=since,
+                until=until,
+                max_pages=10,
+                max_records=250,
+            )
+    except (DipProviderError, httpx.HTTPError, OSError, RuntimeError) as error:
+        return 2, {
+            "status": "temporarily_unavailable",
+            "source": "dip",
+            "detail": str(error),
+        }
+    return 0, {"status": "ok", **report.__dict__}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the command-line entry point."""
     args = build_parser().parse_args(argv)
@@ -148,6 +220,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.command == "configure":
         store_credential(args.credential)
         print(f"Stored {args.credential} in the OS credential store.")
+    elif args.command == "setup-client":
+        executable = args.executable or Path(sys.argv[0])
+        report = setup_client(args.client, executable, dry_run=args.dry_run)
+        if args.format == "json":
+            print(json.dumps(report.as_dict(), indent=2))
+        else:
+            for step in report.steps:
+                print(f"{step.status.upper():9} {step.profile}: {step.detail}")
+            if report.status == "ok":
+                print(f"DONE      {args.client}: restart the client, then run doctor")
+        return 0 if report.status in {"ok", "planned"} else 1
     elif args.command == "verify-schemas":
         registry = load_registry(args.registry)
         print(
@@ -179,11 +262,39 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
     elif args.command in {"sync", "backfill"}:
+        start: date | None = None
+        end: date | None = None
         if args.command == "backfill":
             start = date.fromisoformat(args.from_date)
             end = date.fromisoformat(args.to_date)
             if start > end:
                 raise ValueError("--from-date must not be after --to-date")
+        if args.source == "dip":
+            api_key = load_credential("DIP_API_KEY")
+            if api_key is None:
+                print(
+                    json.dumps(
+                        {
+                            "status": "not_configured",
+                            "source": "dip",
+                            "detail": (
+                                "Store DIP_API_KEY with policy-mcp configure before syncing."
+                            ),
+                        }
+                    )
+                )
+                return 2
+            now = datetime.now(UTC)
+            if args.command == "backfill":
+                assert start is not None and end is not None
+                since = datetime.combine(start, time.min, tzinfo=UTC)
+                until = datetime.combine(end, time.max, tzinfo=UTC)
+            else:
+                since = _dip_incremental_start(now)
+                until = now
+            exit_code, report = asyncio.run(_run_dip_sync(since, until, api_key=api_key))
+            print(json.dumps(report))
+            return exit_code
         blocked, report = _source_not_ready(args.registry, args.source)
         if not blocked:
             report["status"] = "not_configured"

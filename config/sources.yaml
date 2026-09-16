@@ -22,8 +22,8 @@ sources:
     coverage_limits: German federal parliamentary procedures represented by DIP.
     parser_version: "1"
     routes:
-      procedure_search: {state: not_configured, allowed_operations: [dip.procedure.search], enable_after: [schema_pin, authentication_test, pagination_test]}
-      procedure_get: {state: not_configured, allowed_operations: [dip.procedure.get], enable_after: [schema_pin, authentication_test]}
+      procedure_search: {state: healthy, allowed_operations: [dip.procedure.search], enable_after: [schema_pin, authentication_test, pagination_test]}
+      procedure_get: {state: healthy, allowed_operations: [dip.procedure.get], enable_after: [schema_pin, authentication_test]}
       document_read: {state: not_configured, allowed_operations: [dip.document.get], enable_after: [schema_pin, authentication_test, document_test]}
 
   ep:
@@ -214,7 +214,7 @@ sources:
     coverage_limits: Catalogue discovery only; distributions are non-queryable until separately integrated.
     parser_version: "1"
     routes:
-      catalogue_search: {state: not_configured, allowed_operations: [govdata.package_search, govdata.package_show], enable_after: [schema_pin, envelope_test, pagination_test]}
+      catalogue_search: {state: healthy, allowed_operations: [govdata.package_search, govdata.package_show], enable_after: [schema_pin, envelope_test, pagination_test]}
 
   genesis:
     adapter: GenesisAdapter

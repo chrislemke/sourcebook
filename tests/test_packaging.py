@@ -33,6 +33,8 @@ def test_builds_all_package_families_from_one_binary_and_skill(tmp_path: Path) -
     report = build_packages(binary, output, target="darwin-arm64")
 
     assert len(report.mcp_bundles) == 3
+    assert (output / "bin" / "policy-mcp").read_bytes() == binary.read_bytes()
+    assert (output / "bin" / "policy-mcp").stat().st_mode & stat.S_IXUSR
     for profile, bundle in report.mcp_bundles.items():
         assert bundle.name == f"policy-{profile}-0.1.0-darwin-arm64.mcpb"
         with zipfile.ZipFile(bundle) as archive:

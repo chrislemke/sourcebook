@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from policy_mcp.cli import main
-from policy_mcp.diagnostics import run_doctor
+from policy_mcp.diagnostics import _has_installed_plugin, run_doctor
 
 
 def test_doctor_reports_shared_store_without_secrets(
@@ -70,3 +71,47 @@ def test_doctor_reports_a_broken_database_instead_of_crashing(
     assert report.status == "error"
     assert report.checks[2].name == "database"
     assert report.checks[2].detail == "Database failed: malformed"
+
+
+def test_plugin_check_requires_an_installed_and_enabled_sourcebook_plugin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("policy_mcp.diagnostics.shutil.which", lambda _name: "/usr/bin/codex")
+
+    def plugin_list(payload: dict[str, object]) -> None:
+        monkeypatch.setattr(
+            "policy_mcp.diagnostics.subprocess.run",
+            lambda command, **_kwargs: subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(payload),
+                stderr="",
+            ),
+        )
+
+    plugin_list(
+        {
+            "installed": [
+                {
+                    "pluginId": "policy-research@policy-tools",
+                    "installed": False,
+                    "enabled": True,
+                },
+                {"pluginId": "another@plugin", "installed": True, "enabled": True},
+            ]
+        }
+    )
+    assert _has_installed_plugin("codex-cli") is False
+
+    plugin_list(
+        {
+            "installed": [
+                {
+                    "pluginId": "policy-research@policy-tools",
+                    "installed": True,
+                    "enabled": True,
+                }
+            ]
+        }
+    )
+    assert _has_installed_plugin("codex-cli") is True

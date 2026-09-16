@@ -354,7 +354,13 @@ def persist_sync_window(
                 ),
             )
             persisted += connection.total_changes - before
-            subjects = record.payload.get("subjects", [])
+            current_payload_json = connection.execute(
+                "SELECT payload_json FROM record_versions WHERE record_id = ? "
+                "ORDER BY source_timestamp DESC, id DESC LIMIT 1",
+                (record_id,),
+            ).fetchone()[0]
+            current_payload = json.loads(str(current_payload_json))
+            subjects = current_payload.get("subjects", [])
             searchable_subjects = (
                 " ".join(str(item) for item in subjects)
                 if isinstance(subjects, list | tuple)
@@ -366,8 +372,8 @@ def persist_sync_window(
                 "VALUES (?, ?, ?, ?)",
                 (
                     record_id,
-                    str(record.payload.get("title", "")),
-                    str(record.payload.get("abstract", "")),
+                    str(current_payload.get("title", "")),
+                    str(current_payload.get("abstract", "")),
                     searchable_subjects,
                 ),
             )
@@ -377,9 +383,19 @@ def persist_sync_window(
                     source_id, completed_watermark, in_progress_cursor, window_start, updated_at
                 ) VALUES (?, ?, NULL, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(source_id) DO UPDATE SET
-                    completed_watermark = excluded.completed_watermark,
+                    completed_watermark = CASE
+                        WHEN sync_state.completed_watermark IS NULL
+                          OR excluded.completed_watermark > sync_state.completed_watermark
+                        THEN excluded.completed_watermark
+                        ELSE sync_state.completed_watermark
+                    END,
                     in_progress_cursor = NULL,
-                    window_start = excluded.window_start,
+                    window_start = CASE
+                        WHEN sync_state.completed_watermark IS NULL
+                          OR excluded.completed_watermark > sync_state.completed_watermark
+                        THEN excluded.window_start
+                        ELSE sync_state.window_start
+                    END,
                     updated_at = CURRENT_TIMESTAMP
                 """,
             (source_id, window_end, window_start),
