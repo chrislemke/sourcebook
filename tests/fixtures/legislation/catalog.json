@@ -1,0 +1,117 @@
+{
+  "retrieved_at": "2026-09-15T12:00:00Z",
+  "indexed_at": "2026-09-15T12:05:00Z",
+  "records": [
+    {
+      "key": "dip:vorgang:101",
+      "kind": "procedure",
+      "jurisdiction": "DE",
+      "source": "dip",
+      "provider_id": "101",
+      "identifier": "20/1234",
+      "title": "Entwurf eines Gesetzes zur digitalen Verwaltung",
+      "abstract": "Der Entwurf regelt digitale Verwaltungsleistungen des Bundes.",
+      "subjects": ["Digitalisierung", "Verwaltung"],
+      "status": "Abgeschlossen",
+      "source_language": "de",
+      "official_url": "https://dip.bundestag.de/vorgang/101",
+      "source_modified_at": "2026-09-14T08:00:00Z",
+      "events": [
+        {"date": "2026-06-01", "label": "Zuleitung an den Bundestag"},
+        {"date": "2026-07-10", "label": "Beschluss des Bundestages"}
+      ],
+      "document_keys": ["dip:dokument:bt-20-1234"]
+    },
+    {
+      "key": "dip:vorgang:102",
+      "kind": "procedure",
+      "jurisdiction": "DE",
+      "source": "dip",
+      "provider_id": "102",
+      "identifier": "20/2345",
+      "title": "Änderung des Onlinezugangsgesetzes",
+      "abstract": "Das Verfahren betrifft digitale Verwaltungsportale.",
+      "subjects": ["Digitalisierung", "Onlinezugang"],
+      "status": "Beratung",
+      "source_language": "de",
+      "official_url": "https://dip.bundestag.de/vorgang/102",
+      "source_modified_at": "2026-09-13T09:30:00Z",
+      "events": [],
+      "document_keys": []
+    },
+    {
+      "key": "dip:vorgang:103",
+      "kind": "procedure",
+      "jurisdiction": "DE",
+      "source": "dip",
+      "provider_id": "103",
+      "identifier": "20/3456",
+      "title": "Registermodernisierungsgesetz",
+      "abstract": "Register sollen für digitale Verwaltungsverfahren modernisiert werden.",
+      "subjects": ["Digitalisierung", "Register"],
+      "status": "Verkündet",
+      "source_language": "de",
+      "official_url": "https://dip.bundestag.de/vorgang/103",
+      "source_modified_at": "2026-09-12T10:00:00Z",
+      "events": [],
+      "document_keys": []
+    },
+    {
+      "key": "cellar:work:32024R1689",
+      "kind": "legal_text",
+      "jurisdiction": "EU",
+      "source": "cellar",
+      "provider_id": "32024R1689",
+      "identifier": "CELEX:32024R1689",
+      "title": "Artificial Intelligence Act",
+      "abstract": "Harmonised rules on artificial intelligence.",
+      "subjects": ["artificial intelligence"],
+      "status": "In force",
+      "source_language": "en",
+      "available_languages": ["de", "en"],
+      "official_url": "https://eur-lex.europa.eu/eli/reg/2024/1689/oj",
+      "source_modified_at": "2024-07-12T00:00:00Z",
+      "events": [],
+      "document_keys": ["cellar:file:32024R1689:en"]
+    }
+  ],
+  "documents": [
+    {
+      "key": "dip:dokument:bt-20-1234",
+      "source": "dip",
+      "provider_id": "BT-20-1234",
+      "title": "Gesetzentwurf zur digitalen Verwaltung",
+      "source_language": "de",
+      "official_url": "https://dip.bundestag.de/dokument/BT-20-1234",
+      "source_modified_at": "2026-06-01T07:00:00Z",
+      "sections": [
+        {
+          "heading": "§ 1 Zweck",
+          "locator": {"kind": "paragraph", "start": "1", "end": "2"},
+          "text": "Dieses Gesetz erleichtert digitale Verwaltungsleistungen. Es begründet keinen Anspruch auf eine vollständig automatisierte Entscheidung. Ausnahmen für besonders schutzbedürftige Daten bleiben unberührt."
+        },
+        {
+          "heading": "§ 2 Inkrafttreten",
+          "locator": {"kind": "paragraph", "start": "3", "end": "3"},
+          "text": "Dieses Gesetz tritt am ersten Tag des folgenden Monats in Kraft."
+        }
+      ]
+    },
+    {
+      "key": "cellar:file:32024R1689:en",
+      "source": "cellar",
+      "provider_id": "32024R1689-en",
+      "title": "Artificial Intelligence Act, English expression",
+      "source_language": "en",
+      "official_url": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689",
+      "source_modified_at": "2024-07-12T00:00:00Z",
+      "sections": [
+        {
+          "heading": "Article 1",
+          "locator": {"kind": "article", "start": "1", "end": "1"},
+          "text": "This Regulation lays down harmonised rules on artificial intelligence."
+        }
+      ]
+    }
+  ]
+}

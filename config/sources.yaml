@@ -1,0 +1,291 @@
+registry_version: 1
+policy:
+  no_fee_sources_only: true
+  public_read_only: true
+  default_search_limit: 5
+  interactive_max_provider_requests: 6
+
+sources:
+  dip:
+    adapter: DipAdapter
+    transport: rest
+    allowed_hosts: [search.dip.bundestag.de, dip.bundestag.de]
+    credential_transport: os_keyring_or_environment
+    fixture_hashes: {}
+    licence: {name: DIP terms of use, url: "https://dip.bundestag.de/über-dip/hilfe/api"}
+    attribution: Deutscher Bundestag, DIP
+    date_bases: [published_at, source_modified_at]
+    pagination: {kind: cursor, stable: false}
+    refresh_policy: {cadence: PT30M, freshness_threshold: PT2H}
+    supported_languages: [de]
+    language_fallback: source_only
+    coverage_limits: German federal parliamentary procedures represented by DIP.
+    parser_version: "1"
+    routes:
+      procedure_search: {state: not_configured, allowed_operations: [dip.procedure.search], enable_after: [schema_pin, authentication_test, pagination_test]}
+      procedure_get: {state: not_configured, allowed_operations: [dip.procedure.get], enable_after: [schema_pin, authentication_test]}
+      document_read: {state: not_configured, allowed_operations: [dip.document.get], enable_after: [schema_pin, authentication_test, document_test]}
+
+  ep:
+    adapter: EuropeanParliamentAdapter
+    transport: rest_jsonld
+    allowed_hosts: [data.europarl.europa.eu]
+    credential_transport: none
+    fixture_hashes: {}
+    licence: {name: European Parliament reuse policy, url: "https://www.europarl.europa.eu/legal-notice/en/"}
+    attribution: European Parliament
+    date_bases: [published_at, event_at, source_modified_at]
+    pagination: {kind: collection_specific, stable: false}
+    refresh_policy: {cadence: PT1H, freshness_threshold: PT6H}
+    supported_languages: [de, en]
+    language_fallback: explicit_only
+    coverage_limits: Coverage and searchable fields vary by European Parliament collection.
+    parser_version: "1"
+    routes:
+      procedure_search: {state: not_configured, allowed_operations: [ep.procedure.list], enable_after: [schema_pin, collection_contract_test]}
+      speech_search: {state: not_configured, allowed_operations: [ep.speech.search], enable_after: [schema_pin, collection_contract_test]}
+      question_search: {state: not_configured, allowed_operations: [ep.question.list], enable_after: [schema_pin, collection_contract_test]}
+      committee_documents: {state: not_configured, allowed_operations: [ep.committee_document.list], enable_after: [schema_pin, collection_contract_test]}
+      actor_roles: {state: not_configured, allowed_operations: [ep.actor.roles], enable_after: [schema_pin, collection_contract_test]}
+
+  cellar:
+    adapter: CellarAdapter
+    transport: sparql_and_files
+    allowed_hosts: [publications.europa.eu, eur-lex.europa.eu]
+    credential_transport: none
+    fixture_hashes: {}
+    licence: {name: European Commission reuse policy, url: "https://commission.europa.eu/legal-notice_en"}
+    attribution: Publications Office of the European Union
+    date_bases: [published_at, effective_at]
+    pagination: {kind: offset, stable: false}
+    refresh_policy: {cadence: on_demand, freshness_threshold: P1D}
+    supported_languages: [de, en]
+    language_fallback: explicit_only
+    coverage_limits: Identifier and bounded metadata lookup; not unrestricted full-text search.
+    parser_version: "1"
+    routes:
+      celex_lookup: {state: not_configured, allowed_operations: [cellar.celex.lookup], enable_after: [template_test, schema_pin]}
+      document_resolve: {state: not_configured, allowed_operations: [cellar.document.resolve], enable_after: [template_test, file_test]}
+
+  eurlex:
+    adapter: EurLexAdapter
+    transport: soap
+    allowed_hosts: [eur-lex.europa.eu]
+    credential_transport: os_keyring_or_environment
+    fixture_hashes: {}
+    licence: {name: European Commission reuse policy, url: "https://commission.europa.eu/legal-notice_en"}
+    attribution: EUR-Lex
+    date_bases: [published_at, effective_at, applicability_at]
+    pagination: {kind: page, stable: false}
+    refresh_policy: {cadence: on_demand, freshness_threshold: P1D}
+    supported_languages: [de, en]
+    language_fallback: explicit_only
+    coverage_limits: Registered bounded search only; account limits apply.
+    parser_version: "1"
+    routes:
+      legal_search: {state: not_configured, allowed_operations: [eurlex.search], enable_after: [registration, wsdl_validation, paging_test, fault_test]}
+
+  lobbyregister:
+    adapter: LobbyregisterAdapter
+    transport: rest
+    allowed_hosts: [www.lobbyregister.bundestag.de]
+    credential_transport: os_keyring_or_environment
+    fixture_hashes: {}
+    licence: {name: Lobbyregister usage terms, url: "https://www.lobbyregister.bundestag.de/"}
+    attribution: Deutscher Bundestag, Lobbyregister
+    date_bases: [published_at, source_modified_at, effective_at]
+    pagination: {kind: page, stable: false}
+    refresh_policy: {cadence: P1D, freshness_threshold: P2D}
+    supported_languages: [de]
+    language_fallback: source_only
+    coverage_limits: Published German federal interest-representation disclosures.
+    parser_version: "1"
+    routes:
+      actor_search: {state: not_configured, allowed_operations: [lobbyregister.entry.search], enable_after: [schema_pin, authentication_test, pagination_test]}
+      interests: {state: not_configured, allowed_operations: [lobbyregister.entry.get], enable_after: [schema_pin, authentication_test]}
+
+  eu_whoiswho:
+    adapter: EuWhoisWhoAdapter
+    transport: published_download
+    allowed_hosts: [op.europa.eu]
+    credential_transport: none
+    fixture_hashes: {}
+    licence: {name: European Commission reuse policy, url: "https://commission.europa.eu/legal-notice_en"}
+    attribution: Publications Office of the European Union, EU WhoisWho
+    date_bases: [source_modified_at, observed_at]
+    pagination: {kind: snapshot, stable: true}
+    refresh_policy: {cadence: P1D, freshness_threshold: P3D}
+    supported_languages: [de, en]
+    language_fallback: explicit_only
+    coverage_limits: Current published organisational roles; historical coverage is not implied.
+    parser_version: "1"
+    routes:
+      actor_search: {state: not_configured, allowed_operations: [eu_whoiswho.snapshot], enable_after: [distribution_resolution, schema_test, freshness_test]}
+      actor_roles: {state: not_configured, allowed_operations: [eu_whoiswho.snapshot], enable_after: [distribution_resolution, schema_test, freshness_test]}
+
+  eu_transparency:
+    adapter: TransparencySnapshotAdapter
+    transport: published_download
+    allowed_hosts: [transparency-register.europa.eu, data.europa.eu]
+    credential_transport: none
+    fixture_hashes: {}
+    licence: {name: European Commission reuse policy, url: "https://commission.europa.eu/legal-notice_en"}
+    attribution: European Union Transparency Register
+    date_bases: [source_modified_at, observed_at]
+    pagination: {kind: snapshot, stable: true}
+    refresh_policy: {cadence: P1D, freshness_threshold: P3D}
+    supported_languages: [de, en]
+    language_fallback: explicit_only
+    coverage_limits: Self-reported current and retained snapshot disclosures only.
+    parser_version: "1"
+    routes:
+      actor_search: {state: not_configured, allowed_operations: [eu_transparency.snapshot], enable_after: [distribution_resolution, schema_test, freshness_test]}
+      interests: {state: not_configured, allowed_operations: [eu_transparency.snapshot], enable_after: [distribution_resolution, schema_test, freshness_test]}
+
+  bundestag_open_data:
+    adapter: BundestagOpenDataAdapter
+    transport: published_download
+    allowed_hosts: [www.bundestag.de]
+    credential_transport: none
+    fixture_hashes: {}
+    licence: {name: Deutscher Bundestag data terms, url: "https://www.bundestag.de/services/opendata"}
+    attribution: Deutscher Bundestag Open Data
+    date_bases: [meeting_at, published_at, source_modified_at]
+    pagination: {kind: manifest, stable: true}
+    refresh_policy: {cadence: P1D, freshness_threshold: P3D}
+    supported_languages: [de]
+    language_fallback: source_only
+    coverage_limits: Published plenary transcripts, member data, and roll-call files.
+    parser_version: "1"
+    routes:
+      speech_search: {state: not_configured, allowed_operations: [bundestag.transcript.download], enable_after: [manifest_test, parser_test]}
+      vote_search: {state: not_configured, allowed_operations: [bundestag.rollcall.download], enable_after: [manifest_test, parser_test]}
+
+  gesetze_im_internet:
+    adapter: GesetzeImInternetAdapter
+    transport: published_download
+    allowed_hosts: [www.gesetze-im-internet.de]
+    credential_transport: none
+    fixture_hashes: {}
+    licence: {name: Website terms, url: "https://www.gesetze-im-internet.de/"}
+    attribution: Bundesministerium der Justiz and Bundesamt für Justiz
+    date_bases: [published_at, source_modified_at]
+    pagination: {kind: manifest, stable: true}
+    refresh_policy: {cadence: P1D, freshness_threshold: P3D}
+    supported_languages: [de]
+    language_fallback: source_only
+    coverage_limits: Consolidated current federal law; authoritative promulgation and complete history are not implied.
+    parser_version: "1"
+    routes:
+      legal_text: {state: not_configured, allowed_operations: [gii.contents.download, gii.document.download], enable_after: [manifest_test, parser_test, legal_status_test]}
+
+  comitology:
+    adapter: ComitologyAdapter
+    transport: published_download
+    allowed_hosts: [ec.europa.eu, data.europa.eu]
+    credential_transport: none
+    fixture_hashes: {}
+    licence: {name: European Commission reuse policy, url: "https://commission.europa.eu/legal-notice_en"}
+    attribution: European Commission Comitology Register
+    date_bases: [meeting_at, published_at, source_modified_at, observed_at]
+    pagination: {kind: snapshot, stable: true}
+    refresh_policy: {cadence: P1D, freshness_threshold: P3D}
+    supported_languages: [de, en]
+    language_fallback: explicit_only
+    coverage_limits: Published committee, agenda, draft-measure, voting-sheet, summary-record, and document datasets.
+    parser_version: "1"
+    routes:
+      record_search: {state: not_configured, allowed_operations: [comitology.datasets.download], enable_after: [distribution_resolution, six_family_parser_tests, freshness_test]}
+      document_read: {state: not_configured, allowed_operations: [comitology.document.download], enable_after: [distribution_resolution, document_test]}
+
+  govdata:
+    adapter: GovDataAdapter
+    transport: ckan
+    allowed_hosts: [www.govdata.de]
+    credential_transport: none
+    fixture_hashes: {}
+    licence: {name: GovData terms of use, url: "https://www.govdata.de/web/guest/nutzungsbestimmungen"}
+    attribution: GovData
+    date_bases: [published_at, source_modified_at]
+    pagination: {kind: offset, stable: false}
+    refresh_policy: {cadence: PT6H, freshness_threshold: P1D}
+    supported_languages: [de]
+    language_fallback: source_only
+    coverage_limits: Catalogue discovery only; distributions are non-queryable until separately integrated.
+    parser_version: "1"
+    routes:
+      catalogue_search: {state: not_configured, allowed_operations: [govdata.package_search, govdata.package_show], enable_after: [schema_pin, envelope_test, pagination_test]}
+
+  genesis:
+    adapter: GenesisAdapter
+    transport: rest
+    allowed_hosts: [genesis.destatis.de]
+    credential_transport: os_keyring_or_environment
+    fixture_hashes: {}
+    licence: {name: Destatis data licence, url: "https://www.destatis.de/DE/Service/Impressum/copyright-genesis-online.html"}
+    attribution: Statistisches Bundesamt, GENESIS-Online
+    date_bases: [period, source_modified_at]
+    pagination: {kind: provider_specific, stable: false}
+    refresh_policy: {cadence: P1D, freshness_threshold: P2D}
+    supported_languages: [de, en]
+    language_fallback: explicit_only
+    coverage_limits: Tables and dimensions supported by the configured GENESIS account and validated schema.
+    parser_version: "1"
+    routes:
+      dataset_describe: {state: not_configured, allowed_operations: [genesis.find, genesis.metadata.table], enable_after: [authentication_test, status_envelope_test, schema_pin]}
+      dataset_query: {state: not_configured, allowed_operations: [genesis.data.table], enable_after: [authentication_test, status_envelope_test, slice_test]}
+
+  de_budget:
+    adapter: FederalBudgetAdapter
+    transport: published_download
+    allowed_hosts: [www.bundeshaushalt.de]
+    credential_transport: none
+    fixture_hashes: {}
+    licence: {name: Federal budget website terms, url: "https://www.bundeshaushalt.de/"}
+    attribution: Bundesministerium der Finanzen
+    date_bases: [fiscal_year, published_at, source_modified_at]
+    pagination: {kind: manifest, stable: true}
+    refresh_policy: {cadence: P1D, freshness_threshold: P3D}
+    supported_languages: [de]
+    language_fallback: source_only
+    coverage_limits: Published federal budget files; stages and classifications remain distinct.
+    parser_version: "1"
+    routes:
+      budget_search: {state: not_configured, allowed_operations: [de_budget.download], enable_after: [distribution_resolution, parser_test, unit_test]}
+
+  ted:
+    adapter: TedAdapter
+    transport: rest
+    allowed_hosts: [api.ted.europa.eu, ted.europa.eu]
+    credential_transport: none
+    fixture_hashes: {}
+    licence: {name: TED legal notice, url: "https://ted.europa.eu/en/legal-notice"}
+    attribution: Tenders Electronic Daily
+    date_bases: [published_at, source_modified_at]
+    pagination: {kind: page, stable: false}
+    refresh_policy: {cadence: PT4H, freshness_threshold: P1D}
+    supported_languages: [de, en]
+    language_fallback: explicit_only
+    coverage_limits: Published procurement notices; a notice is not proof of an award or payment.
+    parser_version: "1"
+    routes:
+      procurement_search: {state: not_configured, allowed_operations: [ted.notice.search], enable_after: [field_projection_test, query_template_test, pagination_test]}
+
+  funding_tenders:
+    adapter: FundingTendersAdapter
+    transport: rest
+    allowed_hosts: [ec.europa.eu]
+    credential_transport: none
+    fixture_hashes: {}
+    licence: {name: European Commission reuse policy, url: "https://commission.europa.eu/legal-notice_en"}
+    attribution: European Commission Funding and Tenders Portal
+    date_bases: [published_at, deadline_at, source_modified_at]
+    pagination: {kind: collection_specific, stable: false}
+    refresh_policy: {cadence: PT4H, freshness_threshold: P1D}
+    supported_languages: [de, en]
+    language_fallback: explicit_only
+    coverage_limits: Calls and funded projects are independently gated collections.
+    parser_version: "1"
+    routes:
+      funding_calls: {state: not_configured, allowed_operations: [funding_tenders.calls.search], enable_after: [serialization_test, pagination_test, detail_test]}
+      funded_projects: {state: not_configured, allowed_operations: [funding_tenders.projects.search], enable_after: [serialization_test, pagination_test, detail_test]}

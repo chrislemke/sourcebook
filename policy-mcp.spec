@@ -10,6 +10,8 @@ a = Analysis(
             'src/policy_mcp/package_templates/skills/policy-research/SKILL.md',
             'policy_mcp/package_templates/skills/policy-research',
         ),
+        ('config/sources.yaml', 'policy_mcp/resources'),
+        ('evals/routing-v1.json', 'policy_mcp/resources'),
     ],
     hiddenimports=[],
     hookspath=[],

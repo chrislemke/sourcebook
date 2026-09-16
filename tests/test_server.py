@@ -8,51 +8,90 @@ from mcp.types import CallToolResult
 from policy_mcp.server import create_server
 
 
-@pytest.mark.parametrize(
-    ("profile", "server_name"),
-    [
-        ("legislation", "policy-legislation"),
-        ("actors", "policy-actors"),
-        ("evidence", "policy-evidence"),
-    ],
-)
-async def test_profile_exposes_only_its_read_only_diagnostic(
-    profile: str,
-    server_name: str,
+async def test_legislation_profile_exposes_stable_research_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("POLICY_MCP_DATA_DIR", str(tmp_path / "shared state"))
-    server = create_server(profile)
+    monkeypatch.setenv("POLICY_MCP_DATA_DIR", str(tmp_path))
+    server = create_server("legislation", principal="local-test")
 
-    assert server.name == server_name
+    assert server.name == "policy-legislation"
     tools = await server.list_tools()
-    assert [tool.name for tool in tools] == ["policy_diagnostic"]
-    assert tools[0].input_schema == {
-        "properties": {},
-        "title": "policy_diagnosticArguments",
-        "type": "object",
-    }
-    assert tools[0].annotations is not None
-    assert tools[0].annotations.read_only_hint is True
-    assert tools[0].annotations.destructive_hint is False
-    assert tools[0].annotations.idempotent_hint is True
-    assert tools[0].annotations.open_world_hint is False
+    assert [tool.name for tool in tools] == [
+        "legislation_search",
+        "legislation_procedure",
+        "legislation_records",
+        "legislation_read",
+        "legislation_changes",
+        "legislation_capabilities",
+    ]
+    for tool in tools:
+        assert tool.input_schema["additionalProperties"] is False
+        assert tool.annotations is not None
+        assert tool.annotations.read_only_hint is True
+        assert tool.annotations.destructive_hint is False
+        assert tool.annotations.idempotent_hint is True
 
-    result = await server.call_tool("policy_diagnostic", {})
-
+    result = await server.call_tool("legislation_capabilities", {})
     assert isinstance(result, CallToolResult)
-    assert result.is_error is not True
-    assert result.structured_content == {
-        "profile": profile,
-        "server_name": server_name,
-        "transport": "stdio",
-        "read_only": True,
-        "data_directory": str(tmp_path / "shared state"),
-        "database": {
-            "journal_mode": "wal",
-            "busy_timeout_ms": 5000,
-            "readable": True,
-            "writable": True,
-        },
+    assert result.structured_content is not None
+    assert result.structured_content["status"] == "ok"
+    assert {item["state"] for item in result.structured_content["sources"]} == {"not_configured"}
+
+
+async def test_actor_profile_exposes_stable_research_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("POLICY_MCP_DATA_DIR", str(tmp_path))
+    server = create_server("actors", principal="local-test")
+
+    tools = await server.list_tools()
+    assert [tool.name for tool in tools] == [
+        "actor_search",
+        "actor_get",
+        "actor_interests",
+        "actor_capabilities",
+    ]
+    for tool in tools:
+        assert tool.input_schema["additionalProperties"] is False
+        assert tool.annotations is not None
+        assert tool.annotations.read_only_hint is True
+        assert tool.annotations.idempotent_hint is True
+
+    result = await server.call_tool("actor_capabilities", {})
+    assert isinstance(result, CallToolResult)
+    assert result.structured_content is not None
+    assert result.structured_content["status"] == "ok"
+    assert {item["state"] for item in result.structured_content["sources"]} == {"not_configured"}
+
+
+async def test_evidence_profile_exposes_stable_research_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("POLICY_MCP_DATA_DIR", str(tmp_path))
+    server = create_server("evidence", principal="local-test")
+
+    tools = await server.list_tools()
+    assert [tool.name for tool in tools] == [
+        "evidence_search",
+        "evidence_describe",
+        "evidence_query",
+        "evidence_get",
+        "evidence_capabilities",
+    ]
+    for tool in tools:
+        assert tool.input_schema["additionalProperties"] is False
+        assert tool.annotations is not None
+        assert tool.annotations.read_only_hint is True
+        assert tool.annotations.idempotent_hint is True
+
+    result = await server.call_tool("evidence_capabilities", {})
+    assert isinstance(result, CallToolResult)
+    assert result.structured_content is not None
+    assert result.structured_content["status"] == "ok"
+    assert {item["state"] for item in result.structured_content["sources"]} == {
+        "not_configured",
+        "unsupported",
     }

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Final
 
 from policy_mcp import __version__
-from policy_mcp.contracts import DIAGNOSTIC_TOOL_DESCRIPTION, DIAGNOSTIC_TOOL_NAME
+from policy_mcp.contracts import PROFILE_TOOL_NAMES, tool_description
 from policy_mcp.profiles import Profile
 
 PLUGIN_NAME: Final = "policy-research"
@@ -91,10 +91,8 @@ def _mcpb_manifest(profile: Profile, platform: str) -> dict[str, object]:
             },
         },
         "tools": [
-            {
-                "name": DIAGNOSTIC_TOOL_NAME,
-                "description": DIAGNOSTIC_TOOL_DESCRIPTION,
-            }
+            {"name": name, "description": tool_description(name)}
+            for name in PROFILE_TOOL_NAMES[profile]
         ],
         "compatibility": {"platforms": [platform]},
     }

@@ -2,80 +2,53 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
 from mcp.server.mcpserver import MCPServer
-from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict
 
 from policy_mcp import __version__
-from policy_mcp.contracts import (
-    DIAGNOSTIC_TOOL_DESCRIPTION,
-    DIAGNOSTIC_TOOL_NAME,
-    DIAGNOSTIC_TOOL_TITLE,
-)
+from policy_mcp.actors import FrozenActorCatalog, register_actor_tools
+from policy_mcp.evidence import FrozenEvidenceCatalog, register_evidence_tools
+from policy_mcp.legislation import FrozenLegislationCatalog, register_legislation_tools
 from policy_mcp.profiles import Profile
-from policy_mcp.storage import data_directory, database_health
+from policy_mcp.references import SQLiteReferenceStore
+from policy_mcp.storage import open_database
 
 
-class DatabaseDiagnostic(BaseModel):
-    """Non-sensitive SQLite status returned through MCP."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    journal_mode: Literal["wal"]
-    busy_timeout_ms: int
-    readable: bool
-    writable: bool
-
-
-class PolicyDiagnostic(BaseModel):
-    """Stable diagnostic response shared by every package family."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    profile: Profile
-    server_name: str
-    transport: Literal["stdio"] = "stdio"
-    read_only: Literal[True] = True
-    data_directory: str
-    database: DatabaseDiagnostic
-
-
-def create_server(profile: Profile | str) -> MCPServer[None]:
+def create_server(
+    profile: Profile | str,
+    *,
+    principal: str = "local-installation",
+    legislation_catalog: FrozenLegislationCatalog | None = None,
+) -> MCPServer[None]:
     """Build the server for one deployment profile."""
     selected = Profile(profile)
+    open_database().close()
     server: MCPServer[None] = MCPServer(
         name=selected.server_name,
         title=f"Sourcebook {selected.value}",
-        description="Local, read-only political research diagnostics.",
+        description="Local, read-only German federal and EU political research.",
         version=__version__,
     )
 
-    @server.tool(
-        name=DIAGNOSTIC_TOOL_NAME,
-        title=DIAGNOSTIC_TOOL_TITLE,
-        description=DIAGNOSTIC_TOOL_DESCRIPTION,
-        annotations=ToolAnnotations(
-            read_only_hint=True,
-            destructive_hint=False,
-            idempotent_hint=True,
-            open_world_hint=False,
-        ),
-        structured_output=True,
-    )
-    def policy_diagnostic() -> PolicyDiagnostic:
-        health = database_health()
-        return PolicyDiagnostic(
-            profile=selected,
-            server_name=selected.server_name,
-            data_directory=str(data_directory()),
-            database=DatabaseDiagnostic(
-                journal_mode="wal",
-                busy_timeout_ms=health.busy_timeout_ms,
-                readable=health.readable,
-                writable=health.writable,
-            ),
+    if selected == Profile.LEGISLATION:
+        register_legislation_tools(
+            server,
+            legislation_catalog or FrozenLegislationCatalog.empty(),
+            SQLiteReferenceStore(principal=principal),
         )
+        return server
+    if selected == Profile.ACTORS:
+        register_actor_tools(
+            server,
+            FrozenActorCatalog.empty(),
+            SQLiteReferenceStore(principal=principal),
+        )
+        return server
+    if selected == Profile.EVIDENCE:
+        register_evidence_tools(
+            server,
+            FrozenEvidenceCatalog.empty(),
+            SQLiteReferenceStore(principal=principal),
+        )
+        return server
 
-    return server
+    raise AssertionError(f"Unhandled profile: {selected}")

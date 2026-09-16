@@ -18,6 +18,11 @@ from policy_mcp.profiles import Profile
 PACKAGED_ROOT = os.environ.get("SOURCEBOOK_TEST_PACKAGES")
 NATIVE_BINARY = os.environ.get("SOURCEBOOK_TEST_BINARY")
 TARGET = os.environ.get("SOURCEBOOK_TEST_TARGET", "darwin-arm64")
+CAPABILITY_TOOLS = {
+    Profile.LEGISLATION: "legislation_capabilities",
+    Profile.ACTORS: "actor_capabilities",
+    Profile.EVIDENCE: "evidence_capabilities",
+}
 pytestmark = [
     pytest.mark.release_artifact,
     pytest.mark.skipif(
@@ -43,7 +48,7 @@ async def capture_contract(
     ):
         initialized = await session.initialize()
         tools = await session.list_tools()
-        result = await session.call_tool("policy_diagnostic", {})
+        result = await session.call_tool(CAPABILITY_TOOLS[profile], {})
     return {
         "server": initialized.server_info.model_dump(by_alias=True, exclude_none=True),
         "tools": [tool.model_dump(by_alias=True, exclude_none=True) for tool in tools.tools],

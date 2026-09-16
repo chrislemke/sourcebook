@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import sqlite3
 import sys
@@ -12,7 +13,9 @@ from typing import Literal
 
 import keyring
 
-from policy_mcp.storage import data_directory, database_health
+from policy_mcp.registry import RouteState, load_registry
+from policy_mcp.resources import bundled_resource
+from policy_mcp.storage import data_directory, database_health, open_database
 
 CredentialName = Literal[
     "DIP_API_KEY",
@@ -145,9 +148,58 @@ def run_doctor(client: ClientName | None = None) -> DoctorReport:
         DoctorCheck(
             "credential_store",
             "ok" if priority > 0 else "warning",
-            f"Credential backend: {type(backend).__name__}",
+            (
+                f"Credential backend: {type(backend).__name__}; "
+                f"{sum(name in os.environ for name in CREDENTIAL_NAMES)} environment "
+                "credential names configured"
+            ),
         )
     )
+
+    try:
+        registry = load_registry(bundled_resource("sources.yaml", Path("config/sources.yaml")))
+        healthy = sum(
+            registration.state is RouteState.HEALTHY
+            for registration in registry.registrations.values()
+        )
+        checks.append(
+            DoctorCheck(
+                "route_registry",
+                "warning" if registry.issues or healthy == 0 else "ok",
+                (
+                    f"{len(registry.registrations)} routes; {healthy} healthy; "
+                    f"{len(registry.issues)} schema issues"
+                ),
+            )
+        )
+    except (OSError, ValueError) as error:
+        checks.append(DoctorCheck("route_registry", "error", f"Registry failed: {error}"))
+
+    try:
+        with open_database() as connection:
+            record_count = int(connection.execute("SELECT COUNT(*) FROM records").fetchone()[0])
+            completed_syncs = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM sync_state WHERE completed_watermark IS NOT NULL"
+                ).fetchone()[0]
+            )
+        checks.append(
+            DoctorCheck(
+                "index_state",
+                "ok" if record_count else "warning",
+                f"{record_count} indexed source records",
+            )
+        )
+        checks.append(
+            DoctorCheck(
+                "sync_state",
+                "ok" if completed_syncs else "warning",
+                f"{completed_syncs} sources have a completed sync watermark",
+            )
+        )
+    except sqlite3.Error as error:
+        checks.append(DoctorCheck("index_state", "error", f"Index check failed: {error}"))
+        checks.append(DoctorCheck("sync_state", "error", f"Sync-state check failed: {error}"))
 
     if client is not None:
         client_executable = _client_executable(client)

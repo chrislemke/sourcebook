@@ -1,0 +1,219 @@
+{
+  "retrieved_at": "2026-09-15T11:00:00Z",
+  "indexed_at": "2026-09-15T11:10:00Z",
+  "records": [
+    {
+      "key": "genesis:table:13111-0001",
+      "source": "genesis",
+      "kind": "dataset",
+      "provider_id": "13111-0001",
+      "title": "Erwerbstätige nach Gebiet, Jahr und Geschlecht",
+      "description": "Erwerbstätige in Deutschland und ausgewählten Ländern.",
+      "official_url": "https://www-genesis.destatis.de/datenbank/online/statistic/13111/table/13111-0001",
+      "modified_at": "2026-09-14T08:00:00Z",
+      "subjects": ["Arbeit", "Beschäftigung", "Statistik"],
+      "details": {
+        "schema_version": "sha256:genesis-v1",
+        "unit": "Tausend Personen",
+        "scale": 1000,
+        "population": "Erwerbstätige",
+        "measures": ["value", "male", "female", "employees", "self_employed", "full_time", "part_time", "domestic", "national", "seasonally_adjusted", "unadjusted"],
+        "dimensions": [
+          {
+            "dimension_id": "GEO",
+            "label": "Gebiet",
+            "members": [
+              {"member_id": "DE", "label": "Deutschland"},
+              {"member_id": "BE", "label": "Berlin"},
+              {"member_id": "BY", "label": "Bayern"},
+              {"member_id": "HH", "label": "Hamburg"},
+              {"member_id": "NW", "label": "Nordrhein-Westfalen"}
+            ]
+          },
+          {
+            "dimension_id": "TIME",
+            "label": "Jahr",
+            "members": [
+              {"member_id": "2020", "label": "2020"},
+              {"member_id": "2021", "label": "2021"},
+              {"member_id": "2022", "label": "2022"},
+              {"member_id": "2023", "label": "2023"},
+              {"member_id": "2024", "label": "2024"},
+              {"member_id": "2025", "label": "2025"}
+            ]
+          },
+          {
+            "dimension_id": "SEX",
+            "label": "Geschlecht",
+            "members": [
+              {"member_id": "TOTAL", "label": "Insgesamt"},
+              {"member_id": "F", "label": "Weiblich"}
+            ]
+          }
+        ],
+        "rows": [
+          {
+            "dimensions": {"GEO": "DE", "TIME": "2024", "SEX": "TOTAL"},
+            "territory": "Deutschland",
+            "period": "2024",
+            "values": {"value": {"source_text": "46 081", "value": "46081", "status": "value", "symbol": null}},
+            "footnotes": ["Vorläufiges Ergebnis"]
+          },
+          {
+            "dimensions": {"GEO": "DE", "TIME": "2025", "SEX": "TOTAL"},
+            "territory": "Deutschland",
+            "period": "2025",
+            "values": {"value": {"source_text": "x", "value": null, "status": "suppressed", "symbol": "x"}},
+            "footnotes": ["Wert aus Geheimhaltungsgründen gesperrt"]
+          },
+          {
+            "dimensions": {"GEO": "BE", "TIME": "2024", "SEX": "TOTAL"},
+            "territory": "Berlin",
+            "period": "2024",
+            "values": {"value": {"source_text": "2 150", "value": "2150", "status": "value", "symbol": null}},
+            "footnotes": []
+          },
+          {
+            "dimensions": {"GEO": "BE", "TIME": "2025", "SEX": "TOTAL"},
+            "territory": "Berlin",
+            "period": "2025",
+            "values": {"value": {"source_text": "-", "value": null, "status": "missing", "symbol": "-"}},
+            "footnotes": ["Noch nicht verfügbar"]
+          }
+        ]
+      }
+    },
+    {
+      "key": "budget:2026:30:parent",
+      "source": "federal_budget",
+      "kind": "budget",
+      "provider_id": "BHH-2026-30",
+      "title": "Digitalisierung der Verwaltung",
+      "description": "Kapitel 3002, übergeordneter Titelbereich.",
+      "official_url": "https://www.bundeshaushalt.de/2026/kapitel/3002",
+      "modified_at": "2026-01-15T00:00:00Z",
+      "subjects": ["Digitalisierung", "Verwaltung"],
+      "details": {
+        "fiscal_year": 2026,
+        "stage": "enacted",
+        "flow": "expenditure",
+        "amount": "150000",
+        "currency": "EUR",
+        "source_unit": "thousand_eur",
+        "classification_version": "2026",
+        "hierarchy_path": ["30", "3002"],
+        "parent_key": null,
+        "child_keys": ["budget:2026:30:child"],
+        "may_sum_with_children": false
+      }
+    },
+    {
+      "key": "budget:2026:30:child",
+      "source": "federal_budget",
+      "kind": "budget",
+      "provider_id": "BHH-2026-30-53201",
+      "title": "Digitale Verwaltungsdienste",
+      "description": "Einzeltitel unter Kapitel 3002.",
+      "official_url": "https://www.bundeshaushalt.de/2026/titel/53201",
+      "modified_at": "2026-01-15T00:00:00Z",
+      "subjects": ["Digitalisierung", "Verwaltung"],
+      "details": {
+        "fiscal_year": 2026,
+        "stage": "enacted",
+        "flow": "expenditure",
+        "amount": "50000",
+        "currency": "EUR",
+        "source_unit": "thousand_eur",
+        "classification_version": "2026",
+        "hierarchy_path": ["30", "3002", "53201"],
+        "parent_key": "budget:2026:30:parent",
+        "child_keys": [],
+        "may_sum_with_children": false
+      }
+    },
+    {
+      "key": "ted:notice:100",
+      "source": "ted",
+      "kind": "notice",
+      "provider_id": "100-2026",
+      "title": "Bekanntmachung für digitale Verwaltungsdienste",
+      "description": "EU-weite Auftragsbekanntmachung.",
+      "official_url": "https://ted.europa.eu/de/notice/-/detail/100-2026",
+      "modified_at": "2026-08-01T00:00:00Z",
+      "subjects": ["Digitalisierung", "Beschaffung"],
+      "details": {"country": "DE", "buyer": "Bund", "classification": "72000000", "linked_keys": ["ted:procedure:100", "ted:lot:100-1", "ted:award:100-1"]}
+    },
+    {
+      "key": "ted:procedure:100",
+      "source": "ted",
+      "kind": "procurement_procedure",
+      "provider_id": "PROC-100-2026",
+      "title": "Vergabeverfahren digitale Verwaltungsdienste",
+      "description": "Das Verfahren zur Bekanntmachung.",
+      "official_url": "https://ted.europa.eu/procedure/PROC-100-2026",
+      "modified_at": "2026-08-01T00:00:00Z",
+      "subjects": ["Digitalisierung"],
+      "details": {"linked_keys": ["ted:notice:100", "ted:lot:100-1", "ted:award:100-1"]}
+    },
+    {
+      "key": "ted:lot:100-1",
+      "source": "ted",
+      "kind": "lot",
+      "provider_id": "LOT-100-1",
+      "title": "Los 1 Plattformbetrieb",
+      "description": "Ein Los des Vergabeverfahrens.",
+      "official_url": "https://ted.europa.eu/lot/LOT-100-1",
+      "modified_at": "2026-08-01T00:00:00Z",
+      "subjects": ["Digitalisierung"],
+      "details": {"linked_keys": ["ted:procedure:100"]}
+    },
+    {
+      "key": "ted:award:100-1",
+      "source": "ted",
+      "kind": "award",
+      "provider_id": "AWARD-100-1",
+      "title": "Zuschlagsbekanntmachung Plattformbetrieb",
+      "description": "Ein veröffentlichter Zuschlag, keine Zahlungsangabe.",
+      "official_url": "https://ted.europa.eu/award/AWARD-100-1",
+      "modified_at": "2026-09-01T00:00:00Z",
+      "subjects": ["Digitalisierung"],
+      "details": {"linked_keys": ["ted:procedure:100", "ted:lot:100-1"]}
+    },
+    {
+      "key": "funding:call:DIGITAL-2026",
+      "source": "funding_tenders",
+      "kind": "funding_call",
+      "provider_id": "DIGITAL-2026-CALL",
+      "title": "Digital Europe call 2026",
+      "description": "Offener Förderaufruf.",
+      "official_url": "https://funding-tenders.ec.europa.eu/call/DIGITAL-2026-CALL",
+      "modified_at": "2026-07-01T00:00:00Z",
+      "subjects": ["Digitalisierung", "Förderung"],
+      "details": {"programme": "Digital Europe", "status": "open", "deadline": "2026-12-01", "linked_keys": []}
+    },
+    {
+      "key": "funding:project:101",
+      "source": "funding_tenders",
+      "kind": "funded_project",
+      "provider_id": "PROJECT-101",
+      "title": "European public services platform",
+      "description": "Gefördertes Projekt, kein offener Aufruf.",
+      "official_url": "https://cordis.europa.eu/project/id/101",
+      "modified_at": "2026-06-01T00:00:00Z",
+      "subjects": ["Digitalisierung", "Förderung"],
+      "details": {"programme": "Digital Europe", "status": "active", "grant_amount": "5000000", "currency": "EUR", "linked_keys": []}
+    },
+    {
+      "key": "govdata:package:digital-index",
+      "source": "govdata",
+      "kind": "catalogue",
+      "provider_id": "digital-index",
+      "title": "Digitalisierungsindex Deutschland",
+      "description": "Katalogeintrag mit externer CSV-Verteilung.",
+      "official_url": "https://www.govdata.de/web/guest/suchen/-/details/digital-index",
+      "modified_at": "2026-05-01T00:00:00Z",
+      "subjects": ["Digitalisierung", "Katalog"],
+      "details": {"publisher": "Beispielbehörde", "licence": "dl-de/by-2-0", "distributions": [{"provider_id": "digital-index-csv", "title": "CSV", "url": "https://example.invalid/data.csv", "format": "CSV", "queryable": false}]}
+    }
+  ]
+}

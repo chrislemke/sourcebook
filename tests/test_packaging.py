@@ -10,8 +10,9 @@ from typing import Any
 
 import pytest
 
-from policy_mcp.contracts import DIAGNOSTIC_TOOL_DESCRIPTION, DIAGNOSTIC_TOOL_NAME
+from policy_mcp.contracts import PROFILE_TOOL_NAMES, tool_description
 from policy_mcp.packaging import build_packages
+from policy_mcp.profiles import Profile
 
 
 def make_binary(path: Path) -> None:
@@ -115,11 +116,10 @@ def test_package_families_are_reproducible_and_contain_no_secrets(
             assert manifest["server"]["mcp_config"]["command"] == (
                 f"${{__dirname}}/{expected_path}"
             )
+            selected = Profile(profile)
             assert manifest["tools"] == [
-                {
-                    "name": DIAGNOSTIC_TOOL_NAME,
-                    "description": DIAGNOSTIC_TOOL_DESCRIPTION,
-                }
+                {"name": name, "description": tool_description(name)}
+                for name in PROFILE_TOOL_NAMES[selected]
             ]
             for member in archive.namelist():
                 content = archive.read(member)

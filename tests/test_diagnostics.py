@@ -31,6 +31,9 @@ def test_doctor_reports_shared_store_without_secrets(
         "data_directory",
         "database",
         "credential_store",
+        "route_registry",
+        "index_state",
+        "sync_state",
     ]
     assert report["checks"][2]["detail"] == "SQLite WAL, busy timeout 5000 ms"
 

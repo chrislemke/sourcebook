@@ -32,7 +32,7 @@ uv run policy-mcp serve --profile actors
 uv run policy-mcp serve --profile evidence
 ```
 
-Each profile currently exposes the read-only `policy_diagnostic` tool. The tool checks the shared SQLite store without contacting an upstream source. Set `POLICY_MCP_DATA_DIR` only for development or tests; normal runs use the operating system's user-data directory.
+The legislation profile exposes six task-oriented tools, the actor profile four, and the evidence profile five. All are read-only. No live source workers are bound yet, so the production server fails closed with `not_configured` source states; deterministic frozen catalogs are used only by acceptance tests. Set `POLICY_MCP_DATA_DIR` only for development or tests; normal runs use the operating system's user-data directory.
 
 Run operator checks or store an upstream credential with:
 
@@ -40,6 +40,9 @@ Run operator checks or store an upstream credential with:
 uv run policy-mcp doctor
 uv run policy-mcp doctor --client codex-cli
 uv run policy-mcp configure --credential DIP_API_KEY
+uv run policy-mcp verify-schemas
+uv run policy-mcp route-health
+uv run policy-mcp measure-tool-tokens --profile legislation
 ```
 
 `doctor` never reads or prints credential values. `configure` writes the prompted value to the operating system credential store.
@@ -55,8 +58,10 @@ uv run policy-mcp package --binary dist/policy-mcp --output dist/packages --targ
 
 The package command creates three Claude Desktop MCPBs, one Claude Code plugin, one portable OpenAI Agent Plugin, and local marketplace trees. See [docs/packaging.md](docs/packaging.md) for validation and installation details.
 
+Backup, staged restore, bounded backfill gates, routing evaluation, and route-state interpretation are documented in [docs/operations.md](docs/operations.md).
+
 ## Current status
 
-Milestone 0 has a working MCP runtime, package generator, native macOS arm64 proof build, and cross-package contract tests. Claude Code and Codex accepted their generated local plugins. Signed macOS and Windows release checks, plus the Claude Desktop and ChatGPT Desktop installation dialogs, still require release credentials or interactive host validation.
+The local runtime now provides stable legislation, actor, and evidence contracts; durable opaque references; bounded response envelopes; a versioned SQLite/FTS store; content-addressed documents; strict source registry and networking policy; DIP, EP/CELLAR, Bundestag-record, GENESIS, and GovData adapter contracts; and operator backup, restore, routing-evaluation, and health commands. Frozen MCP fixtures verify complete search-to-evidence paths without network access.
 
-Source adapters and research tools begin in milestone 1 and are not implemented yet.
+Live source activation and worker binding remain. The registry currently reports routes as `not_configured` until credentials, current schema fixtures, distribution URLs, and low-volume live checks have passed. Signed macOS and Windows release checks, plus the Claude Desktop and ChatGPT Desktop installation dialogs, still require release credentials or interactive host validation.
