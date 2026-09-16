@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import stat
 import zipfile
@@ -18,6 +20,7 @@ from policy_mcp.profiles import Profile
 PACKAGED_ROOT = os.environ.get("SOURCEBOOK_TEST_PACKAGES")
 NATIVE_BINARY = os.environ.get("SOURCEBOOK_TEST_BINARY")
 TARGET = os.environ.get("SOURCEBOOK_TEST_TARGET", "darwin-arm64")
+INSTALLER_PLACEHOLDER = re.compile(r"\$\{user_config\.[a-z_]+\}")
 CAPABILITY_TOOLS = {
     Profile.LEGISLATION: "legislation_capabilities",
     Profile.ACTORS: "actor_capabilities",
@@ -176,10 +179,28 @@ def test_package_lifecycle_does_not_remove_shared_data_or_credentials(tmp_path: 
         assert_user_state()
 
 
+def without_placeholder_env(document: Any) -> Any:
+    """Drop env entries whose values are installer placeholders, rejecting any other value."""
+    if isinstance(document, list):
+        return [without_placeholder_env(item) for item in document]
+    if not isinstance(document, dict):
+        return document
+    result = {}
+    for key, value in document.items():
+        if key == "env" and isinstance(value, dict):
+            for name, setting in value.items():
+                assert isinstance(setting, str) and INSTALLER_PLACEHOLDER.fullmatch(setting), (
+                    f"{name} must be an installer placeholder, not a literal value"
+                )
+            continue
+        result[key] = without_placeholder_env(value)
+    return result
+
+
 def test_manifests_do_not_contain_credentials() -> None:
     assert PACKAGED_ROOT is not None
-    forbidden = (
-        "seeded-test-secret",
+    secret = b"seeded-test-secret"
+    credential_names = (
         "DIP_API_KEY",
         "LOBBYREGISTER_API_KEY",
         "GENESIS_TOKEN",
@@ -193,7 +214,9 @@ def test_manifests_do_not_contain_credentials() -> None:
             with zipfile.ZipFile(path) as archive:
                 contents = {member: archive.read(member) for member in archive.namelist()}
         for member, content in contents.items():
-            for value in forbidden:
-                assert value.encode() not in content, (
-                    f"Found credential material in {path}:{member}"
-                )
+            assert secret not in content, f"Found credential material in {path}:{member}"
+            if member.endswith(".json"):
+                # Hosts pass keys entered at installation through placeholder env entries.
+                content = json.dumps(without_placeholder_env(json.loads(content))).encode()
+            for name in credential_names:
+                assert name.encode() not in content, f"Found credential material in {path}:{member}"
