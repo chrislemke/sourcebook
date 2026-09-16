@@ -455,7 +455,7 @@ def _fit(response: Any, field_name: str) -> Any:
 
 def _govdata_official_url(provider_id: str) -> str:
     encoded = quote(provider_id, safe="")
-    return f"https://www.govdata.de/ckan/api/3/action/package_show?id={encoded}"
+    return f"https://www.govdata.de/suche/daten/{encoded}"
 
 
 def _govdata_provenance(record: CatalogueRecord, retrieved_at: str) -> Provenance:
@@ -591,13 +591,42 @@ def register_evidence_tools(
         structured_output=True,
     )
     async def evidence_search(
-        query: Annotated[str, Field(min_length=1, max_length=300)],
-        source: EvidenceSource | None = None,
-        kind: EvidenceKind | None = None,
-        year: Annotated[int | None, Field(ge=1900, le=2200)] = None,
-        stage: Literal["draft", "enacted", "supplementary", "actual"] | None = None,
-        flow: Literal["revenue", "expenditure"] | None = None,
-        country: Annotated[str | None, Field(min_length=2, max_length=2)] = None,
+        query: Annotated[
+            str,
+            Field(
+                min_length=1,
+                max_length=300,
+                description="Search words; German keywords such as Bundeshaushalt work best.",
+            ),
+        ],
+        source: Annotated[
+            EvidenceSource | None,
+            Field(description="Omit or use govdata; other sources are not connected yet."),
+        ] = None,
+        kind: Annotated[
+            EvidenceKind | None,
+            Field(description="Omit or use catalogue; other kinds are not connected yet."),
+        ] = None,
+        year: Annotated[
+            int | None,
+            Field(ge=1900, le=2200, description="Budget routes only; not connected yet, omit."),
+        ] = None,
+        stage: Annotated[
+            Literal["draft", "enacted", "supplementary", "actual"] | None,
+            Field(description="Budget routes only; not connected yet, omit."),
+        ] = None,
+        flow: Annotated[
+            Literal["revenue", "expenditure"] | None,
+            Field(description="Budget routes only; not connected yet, omit."),
+        ] = None,
+        country: Annotated[
+            str | None,
+            Field(
+                min_length=2,
+                max_length=2,
+                description="Procurement routes only; not connected yet, omit.",
+            ),
+        ] = None,
         limit: Annotated[int, Field(ge=1, le=10)] = 5,
         cursor: Annotated[str | None, Field(min_length=12, max_length=200)] = None,
     ) -> EvidenceSearchResponse:
@@ -798,9 +827,24 @@ def register_evidence_tools(
                 expected_kinds=("dataset",),
             )
         except ForgedReferenceError:
+            try:
+                reference_store.resolve(
+                    request.reference,
+                    principal=reference_store.principal,
+                    expected_kinds=("catalogue",),
+                )
+            except ForgedReferenceError:
+                return EvidenceDescribeResponse(
+                    status=ResearchStatus.ERROR,
+                    error=_error("forged_reference", "The dataset reference is invalid."),
+                )
             return EvidenceDescribeResponse(
                 status=ResearchStatus.ERROR,
-                error=_error("forged_reference", "The dataset reference is invalid."),
+                error=_error(
+                    "unsupported",
+                    "GovData catalogue entries have no queryable dimensions. "
+                    "Use evidence_get for their metadata and distribution links.",
+                ),
             )
         record = catalog.record(key)
         if record is None:
@@ -1030,7 +1074,10 @@ def register_evidence_tools(
         structured_output=True,
     )
     async def evidence_get(
-        reference: Annotated[str, Field(min_length=12, max_length=200)],
+        reference: Annotated[
+            str,
+            Field(min_length=12, max_length=200, description="Reference from evidence_search."),
+        ],
     ) -> EvidenceGetResponse:
         request = GetInput(reference=reference)
         try:

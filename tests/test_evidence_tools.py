@@ -510,3 +510,15 @@ async def test_search_pagination_and_capabilities_report_disabled_routes() -> No
     assert by_route["genesis.query"] == "ready"
     assert by_route["govdata.distribution_query"] == "unsupported"
     assert by_route["federal_budget.actuals"] == "not_configured"
+
+
+async def test_live_govdata_links_the_portal_page_and_describe_explains_catalogue_limits() -> None:
+    server = build_live_govdata_server(_LiveGovData())
+
+    search = data(await server.call_tool("evidence_search", {"query": "energy"}))
+    item = search["items"][0]
+    described = data(await server.call_tool("evidence_describe", {"reference": item["reference"]}))
+
+    assert item["official_url"] == "https://www.govdata.de/suche/daten/energy-0"
+    assert described["error"]["code"] == "unsupported"
+    assert "evidence_get" in described["error"]["message"]

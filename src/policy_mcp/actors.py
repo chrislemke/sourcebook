@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable
+from contextlib import closing
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -13,7 +14,12 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 from pydantic import Field, model_validator
 
-from policy_mcp.adapters.actors import ActorProviderError, LiveActorSources
+from policy_mcp.adapters.actors import (
+    ActorProviderError,
+    ActorSearchUnsupportedError,
+    LiveActorSources,
+    select_sources,
+)
 from policy_mcp.contracts import tool_description
 from policy_mcp.references import (
     MAX_SNAPSHOT_ITEMS,
@@ -35,6 +41,7 @@ from policy_mcp.research_contracts import (
     StrictModel,
     fit_response,
 )
+from policy_mcp.storage import open_database
 
 
 class ActorScope(StrEnum):
@@ -47,6 +54,10 @@ ActorKind = Literal["person", "institution", "interest_representative"]
 ActorView = Literal["overview", "roles", "relationships", "disclosures", "evidence"]
 ObservationState = Literal["present", "observed_absent", "reappeared"]
 RelationBasis = Literal["explicit_provider_link", "candidate_text_match"]
+SCOPE_DESCRIPTION = (
+    "DE = German Lobbyregister; EU = European Parliament, EU WhoisWho, and EU Transparency "
+    "Register; BOTH = all connected sources."
+)
 
 
 class _Role(StrictModel):
@@ -89,7 +100,7 @@ class _Actor(StrictModel):
     alternative_names: list[str] = Field(default_factory=list)
     description: str
     official_url: str
-    source_modified_at: str
+    source_modified_at: str | None = None
     observation_state: ObservationState
     historical_supported: bool
     roles: list[_Role] = Field(default_factory=list)
@@ -280,9 +291,8 @@ class FrozenActorCatalog:
                 continue
             if request.source is not None and actor.source != request.source:
                 continue
-            if (
-                request.updated_since is not None
-                and actor.source_modified_at < request.updated_since
+            if request.updated_since is not None and not _modified_since(
+                actor, request.updated_since
             ):
                 continue
             searchable = " ".join(
@@ -297,15 +307,24 @@ class FrozenActorCatalog:
     def actors(self) -> Iterable[_Actor]:
         return self._actors.values()
 
-    async def prepare_search(self, request: ActorSearchInput) -> list[ResearchWarning]:
+    async def find(self, request: ActorSearchInput) -> tuple[list[_Actor], list[ResearchWarning]]:
         """Frozen catalogs already contain every actor they can search."""
-        del request
-        return []
+        return self.search(request), []
 
-    async def prepare_interests(self, request: ActorInterestsInput) -> list[ResearchWarning]:
-        """Frozen catalogs already contain every disclosure they can search."""
-        del request
-        return []
+    async def interest_candidates(
+        self, request: ActorInterestsInput, actor_key: str | None
+    ) -> tuple[list[_Actor], set[str], list[ResearchWarning]]:
+        """Return actors to inspect and the keys a provider matched by full text."""
+        del request, actor_key
+        return list(self._actors.values()), set(), []
+
+    def retrieved_at_for(self, actor: _Actor) -> str:
+        del actor
+        return self.retrieved_at
+
+    def indexed_at_for(self, actor: _Actor) -> str:
+        del actor
+        return self.indexed_at
 
     @property
     def ready_sources(self) -> set[str]:
@@ -374,12 +393,13 @@ class FrozenActorCatalog:
 
 
 class LiveActorCatalog(FrozenActorCatalog):
-    """In-memory catalog populated on demand from public official sources."""
+    """Catalog populated on demand from public official sources and kept across restarts."""
 
-    def __init__(self, sources: LiveActorSources | None = None) -> None:
+    def __init__(self, sources: LiveActorSources | None = None, *, persist: bool = True) -> None:
         super().__init__(_Fixture(retrieved_at="", indexed_at="", actors=[]))
         self._sources = sources or LiveActorSources()
-        self._prepared_keys: list[str] = []
+        self._persist = persist
+        self._retrieved: dict[str, str] = {}
 
     @property
     def ready_sources(self) -> set[str]:
@@ -398,7 +418,51 @@ class LiveActorCatalog(FrozenActorCatalog):
         }
         return limitations.get(actor.source, ["Coverage follows the official source."])
 
-    async def prepare_search(self, request: ActorSearchInput) -> list[ResearchWarning]:
+    def actor(self, key: str) -> _Actor | None:
+        actor = self._actors.get(key)
+        if actor is None and self._persist:
+            actor = self._load(key)
+        return actor
+
+    def retrieved_at_for(self, actor: _Actor) -> str:
+        return self._retrieved.get(actor.key, self.retrieved_at)
+
+    def indexed_at_for(self, actor: _Actor) -> str:
+        return self.retrieved_at_for(actor)
+
+    def _load(self, key: str) -> _Actor | None:
+        with closing(open_database()) as connection:
+            row = connection.execute(
+                "SELECT payload_json, retrieved_at FROM actor_observations WHERE actor_key = ?",
+                (key,),
+            ).fetchone()
+        if row is None:
+            return None
+        actor = _Actor.model_validate_json(row[0])
+        self._actors[key] = actor
+        self._retrieved[key] = row[1]
+        return actor
+
+    def _remember(self, actors: list[_Actor], retrieved_at: str) -> None:
+        for actor in actors:
+            self._actors[actor.key] = actor
+            self._retrieved[actor.key] = retrieved_at
+        if not self._persist or not actors:
+            return
+        with closing(open_database()) as connection:
+            connection.executemany(
+                """
+                INSERT INTO actor_observations (actor_key, payload_json, retrieved_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(actor_key) DO UPDATE SET
+                    payload_json = excluded.payload_json,
+                    retrieved_at = excluded.retrieved_at
+                """,
+                [(actor.key, actor.model_dump_json(), retrieved_at) for actor in actors],
+            )
+            connection.commit()
+
+    async def find(self, request: ActorSearchInput) -> tuple[list[_Actor], list[ResearchWarning]]:
         result = await self._sources.search(
             request.query,
             scope=request.scope.value,
@@ -408,43 +472,71 @@ class LiveActorCatalog(FrozenActorCatalog):
             limit=request.limit,
         )
         if not result.successful_sources:
-            raise ActorProviderError("No selected official actor source was reachable")
-        self._prepared_keys = []
-        for record in result.records:
-            actor = _Actor.model_validate(record.model_dump(mode="python"))
-            self._actors[actor.key] = actor
-            self._prepared_keys.append(actor.key)
+            failures = sorted(result.failures.items())
+            raise ActorProviderError(" ".join(f"{name}: {reason}" for name, reason in failures))
+        actors = [
+            _Actor.model_validate(record.model_dump(mode="python")) for record in result.records
+        ]
         self.retrieved_at = result.retrieved_at
         self.indexed_at = result.retrieved_at
-        return [
+        self._remember(actors, result.retrieved_at)
+        warnings = [
             ResearchWarning(
                 code="source_unavailable",
-                message=f"{source} was unavailable; other configured sources were still searched.",
+                message=f"{source} was unavailable: {reason} Other selected sources were searched.",
             )
-            for source in sorted(result.failures)
+            for source, reason in sorted(result.failures.items())
         ]
+        if request.scope == ActorScope.BOTH and request.source is None:
+            covered = {
+                "DE" if name == "lobbyregister" else "EU"
+                for name in select_sources(scope="BOTH", kind=request.kind, source=None)
+            }
+            warnings.extend(
+                ResearchWarning(
+                    code="scope_not_covered",
+                    message=(
+                        f"No connected {jurisdiction} source covers kind={request.kind}; "
+                        f"results cover {', '.join(sorted(covered))} sources only."
+                    ),
+                )
+                for jurisdiction in ("DE", "EU")
+                if jurisdiction not in covered
+            )
+        if request.updated_since is not None:
+            actors = [actor for actor in actors if _modified_since(actor, request.updated_since)]
+        return actors, warnings
 
-    def search(self, request: ActorSearchInput) -> list[_Actor]:
-        """Return the bounded matches selected by the live providers."""
-        return [
-            actor
-            for key in self._prepared_keys
-            if (actor := self._actors.get(key)) is not None
-            and (request.updated_since is None or actor.source_modified_at >= request.updated_since)
-        ]
-
-    async def prepare_interests(self, request: ActorInterestsInput) -> list[ResearchWarning]:
+    async def interest_candidates(
+        self, request: ActorInterestsInput, actor_key: str | None
+    ) -> tuple[list[_Actor], set[str], list[ResearchWarning]]:
+        if actor_key is not None:
+            actor = self.actor(actor_key)
+            return ([actor] if actor is not None else []), set(), []
         if request.query is None:
-            return []
-        return await self.prepare_search(
+            return (
+                [],
+                set(),
+                [
+                    ResearchWarning(
+                        code="procedure_links_unavailable",
+                        message=(
+                            "The live actor sources publish no explicit procedure links. "
+                            "Search with the procedure title as query instead."
+                        ),
+                    )
+                ],
+            )
+        actors, warnings = await self.find(
             ActorSearchInput(
                 query=request.query,
                 scope=request.scope,
                 kind="interest_representative",
                 updated_since=request.updated_since,
-                limit=request.limit,
+                limit=10,
             )
         )
+        return actors, {actor.key for actor in actors}, warnings
 
     def capabilities(self) -> list[ActorSourceCapability]:
         return [
@@ -453,7 +545,10 @@ class LiveActorCatalog(FrozenActorCatalog):
                 scope=Jurisdiction.EU,
                 state="ready",
                 operations=["search", "get_roles"],
-                limitations=["Official European Parliament member and body data."],
+                limitations=[
+                    "Official European Parliament member and body data.",
+                    "Bodies are matched by their official acronym, such as BUDG or AFCO.",
+                ],
             ),
             ActorSourceCapability(
                 source="eu_whoiswho",
@@ -490,7 +585,7 @@ def _provenance(catalog: FrozenActorCatalog, actor: _Actor, provider_id: str) ->
         source=actor.source,
         provider_id=provider_id,
         official_url=actor.official_url,
-        retrieved_at=catalog.retrieved_at,
+        retrieved_at=catalog.retrieved_at_for(actor),
         source_modified_at=actor.source_modified_at,
     )
 
@@ -510,10 +605,18 @@ def _coverage(catalog: FrozenActorCatalog, actor: _Actor, *, historical: bool = 
 def _freshness(catalog: FrozenActorCatalog, actor: _Actor) -> Freshness:
     return Freshness(
         source=actor.source,
-        retrieved_at=catalog.retrieved_at,
-        indexed_at=catalog.indexed_at,
+        retrieved_at=catalog.retrieved_at_for(actor),
+        indexed_at=catalog.indexed_at_for(actor),
         source_modified_at=actor.source_modified_at,
     )
+
+
+def _modified_since(actor: _Actor, since: str) -> bool:
+    return actor.source_modified_at is not None and actor.source_modified_at >= since
+
+
+def _unique(items: list[Any]) -> list[Any]:
+    return list({item.model_dump_json(): item for item in items}.values())
 
 
 def _error(code: Any, message: str, *, retryable: bool = False) -> ResearchError:
@@ -603,13 +706,54 @@ def register_actor_tools(
         structured_output=True,
     )
     async def actor_search(
-        query: Annotated[str, Field(min_length=1, max_length=300)],
-        scope: ActorScope,
-        kind: ActorKind,
-        as_of: Annotated[str | None, Field(max_length=40)] = None,
-        updated_since: Annotated[str | None, Field(max_length=40)] = None,
-        source: Annotated[str | None, Field(min_length=1, max_length=50)] = None,
-        language: Literal["de", "en"] = "de",
+        query: Annotated[
+            str,
+            Field(
+                min_length=1,
+                max_length=300,
+                description=(
+                    "Person name, organisation name, or European Parliament body acronym. "
+                    "All words must match."
+                ),
+            ),
+        ],
+        scope: Annotated[
+            ActorScope,
+            Field(description=SCOPE_DESCRIPTION),
+        ],
+        kind: Annotated[
+            ActorKind,
+            Field(
+                description=(
+                    "person for politicians and officials, institution for European Parliament "
+                    "bodies, interest_representative for lobby register entries."
+                )
+            ),
+        ],
+        as_of: Annotated[
+            str | None,
+            Field(max_length=40, description="Not supported by the live sources; omit."),
+        ] = None,
+        updated_since: Annotated[
+            str | None,
+            Field(
+                max_length=40,
+                description="ISO date; keep only entries the source marks as changed since then.",
+            ),
+        ] = None,
+        source: Annotated[
+            str | None,
+            Field(
+                min_length=1,
+                max_length=50,
+                description=(
+                    "Optional single source: ep, eu_whoiswho, lobbyregister, or eu_transparency."
+                ),
+            ),
+        ] = None,
+        language: Annotated[
+            Literal["de", "en"], Field(description="Language for generated labels.")
+        ] = "de",
         limit: Annotated[int, Field(ge=1, le=10)] = 5,
         cursor: Annotated[str | None, Field(min_length=12, max_length=200)] = None,
     ) -> ActorSearchResponse:
@@ -629,31 +773,41 @@ def register_actor_tools(
         ):
             return ActorSearchResponse(
                 status=ResearchStatus.ERROR,
-                error=_error("not_configured", "No matching actor source has passed its gate."),
+                error=_error(
+                    "not_configured",
+                    "No matching actor source has passed its gate. Available sources: "
+                    + (", ".join(sorted(catalog.ready_sources)) or "none")
+                    + ".",
+                ),
             )
         if request.as_of is not None:
             return ActorSearchResponse(
                 status=ResearchStatus.ERROR,
                 error=_error(
                     "unsupported",
-                    "The frozen actor sources do not support historical as-of search.",
-                ),
-            )
-        try:
-            source_warnings = await catalog.prepare_search(request)
-        except ActorProviderError:
-            return ActorSearchResponse(
-                status=ResearchStatus.ERROR,
-                error=_error(
-                    "temporarily_unavailable",
-                    "The selected official actor sources could not be reached.",
-                    retryable=True,
+                    "The connected actor sources do not support historical as-of search.",
                 ),
             )
         digest = _query_hash(request)
+        source_warnings: list[ResearchWarning] = []
         try:
             if request.cursor is None:
-                matches = catalog.search(request)
+                try:
+                    matches, source_warnings = await catalog.find(request)
+                except ActorSearchUnsupportedError as error:
+                    return ActorSearchResponse(
+                        status=ResearchStatus.ERROR,
+                        error=_error("unsupported", str(error)),
+                    )
+                except ActorProviderError as error:
+                    return ActorSearchResponse(
+                        status=ResearchStatus.ERROR,
+                        error=_error(
+                            "temporarily_unavailable",
+                            f"The selected official actor sources could not be reached. {error}",
+                            retryable=True,
+                        ),
+                    )
                 page = reference_store.first_page(
                     [actor.key for actor in matches],
                     principal=reference_store.principal,
@@ -696,7 +850,7 @@ def register_actor_tools(
                 *source_warnings,
                 *(warning for actor in actors for warning in _warning_for(actor)),
             ],
-            coverage=[_coverage(catalog, actor) for actor in actors],
+            coverage=_unique([_coverage(catalog, actor) for actor in actors]),
             freshness=[_freshness(catalog, actor) for actor in actors],
             provenance=[card.provenance for card in cards],
         )
@@ -709,8 +863,19 @@ def register_actor_tools(
         structured_output=True,
     )
     def actor_get(
-        reference: Annotated[str, Field(min_length=12, max_length=200)],
-        view: ActorView = "overview",
+        reference: Annotated[
+            str,
+            Field(min_length=12, max_length=200, description="Reference from actor_search."),
+        ],
+        view: Annotated[
+            ActorView,
+            Field(
+                description=(
+                    "overview, roles for dated offices and memberships, relationships, "
+                    "disclosures for lobbying details, or evidence for source links."
+                )
+            ),
+        ] = "overview",
         as_of: Annotated[str | None, Field(max_length=40)] = None,
         section_id: Annotated[str | None, Field(min_length=1, max_length=100)] = None,
         query: Annotated[str | None, Field(min_length=1, max_length=300)] = None,
@@ -828,10 +993,34 @@ def register_actor_tools(
         structured_output=True,
     )
     async def actor_interests(
-        scope: ActorScope,
-        query: Annotated[str | None, Field(min_length=1, max_length=300)] = None,
-        procedure_reference: Annotated[str | None, Field(min_length=12, max_length=200)] = None,
-        actor_reference: Annotated[str | None, Field(min_length=12, max_length=200)] = None,
+        scope: Annotated[
+            ActorScope,
+            Field(description=SCOPE_DESCRIPTION),
+        ],
+        query: Annotated[
+            str | None,
+            Field(
+                min_length=1,
+                max_length=300,
+                description="Topic to find declaring organisations; German terms for scope DE.",
+            ),
+        ] = None,
+        procedure_reference: Annotated[
+            str | None,
+            Field(
+                min_length=12,
+                max_length=200,
+                description="Procedure reference from legislation tools; live sources lack links.",
+            ),
+        ] = None,
+        actor_reference: Annotated[
+            str | None,
+            Field(
+                min_length=12,
+                max_length=200,
+                description="Organisation reference from actor_search to list its interests.",
+            ),
+        ] = None,
         updated_since: Annotated[str | None, Field(max_length=40)] = None,
         limit: Annotated[int, Field(ge=1, le=10)] = 5,
         cursor: Annotated[str | None, Field(min_length=12, max_length=200)] = None,
@@ -845,17 +1034,6 @@ def register_actor_tools(
             limit=limit,
             cursor=cursor,
         )
-        try:
-            source_warnings = await catalog.prepare_interests(request)
-        except ActorProviderError:
-            return ActorInterestsResponse(
-                status=ResearchStatus.ERROR,
-                error=_error(
-                    "temporarily_unavailable",
-                    "The selected official actor sources could not be reached.",
-                    retryable=True,
-                ),
-            )
         try:
             actor_key = (
                 reference_store.resolve(
@@ -880,7 +1058,33 @@ def register_actor_tools(
                 status=ResearchStatus.ERROR,
                 error=_error("forged_reference", "The supplied reference is invalid."),
             )
-        matches = _interest_matches(catalog, reference_store, request, actor_key, procedure_key)
+        try:
+            candidates, candidate_keys, source_warnings = await catalog.interest_candidates(
+                request, actor_key
+            )
+        except ActorSearchUnsupportedError as error:
+            return ActorInterestsResponse(
+                status=ResearchStatus.ERROR,
+                error=_error("unsupported", str(error)),
+            )
+        except ActorProviderError as error:
+            return ActorInterestsResponse(
+                status=ResearchStatus.ERROR,
+                error=_error(
+                    "temporarily_unavailable",
+                    f"The selected official actor sources could not be reached. {error}",
+                    retryable=True,
+                ),
+            )
+        matches = _interest_matches(
+            catalog,
+            reference_store,
+            request,
+            candidates,
+            candidate_keys,
+            actor_key,
+            procedure_key,
+        )
         digest = _query_hash(request)
         match_keys = [f"{index}" for index in range(len(matches))]
         try:
@@ -933,7 +1137,7 @@ def register_actor_tools(
                 *source_warnings,
                 *(warning for actor in selected_actors for warning in _warning_for(actor)),
             ],
-            coverage=[_coverage(catalog, actor) for actor in selected_actors],
+            coverage=_unique([_coverage(catalog, actor) for actor in selected_actors]),
             freshness=[_freshness(catalog, actor) for actor in selected_actors],
             provenance=[item.provenance for item in selected],
         )
@@ -1099,19 +1303,21 @@ def _interest_matches(
     catalog: FrozenActorCatalog,
     references: ReferenceStore,
     request: ActorInterestsInput,
+    candidates: Iterable[_Actor],
+    candidate_keys: set[str],
     actor_key: str | None,
     procedure_key: str | None,
 ) -> list[InterestMatch]:
     terms = request.query.casefold().split() if request.query is not None else []
     matches: list[InterestMatch] = []
-    for actor in catalog.actors():
+    for actor in candidates:
         if actor.kind != "interest_representative":
             continue
         if request.scope != ActorScope.BOTH and actor.scope.value != request.scope.value:
             continue
         if actor_key is not None and actor.key != actor_key:
             continue
-        if request.updated_since is not None and actor.source_modified_at < request.updated_since:
+        if request.updated_since is not None and not _modified_since(actor, request.updated_since):
             continue
         actor_reference = references.reference_for(
             principal=references.principal,
@@ -1122,7 +1328,8 @@ def _interest_matches(
             searchable = " ".join(
                 [disclosure.heading, disclosure.wording, *disclosure.clients, *disclosure.projects]
             ).casefold()
-            if terms and not all(term in searchable for term in terms):
+            in_wording = all(term in searchable for term in terms)
+            if not in_wording and actor.key not in candidate_keys:
                 continue
             if procedure_key is not None:
                 continue
@@ -1134,7 +1341,7 @@ def _interest_matches(
                     scope=actor.scope,
                     source=actor.source,
                     predicate="declared_interest",
-                    basis="disclosure_text",
+                    basis="disclosure_text" if in_wording else "candidate_text_match",
                     wording=disclosure.wording,
                     spending_range=disclosure.spending_range,
                     provenance=_provenance(catalog, actor, disclosure.evidence_provider_id),

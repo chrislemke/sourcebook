@@ -6,12 +6,15 @@ import ipaddress
 from pathlib import Path
 
 import httpx
+import pytest
 import respx
 
 from policy_mcp.adapters.actors import (
+    ActorSearchUnsupportedError,
     EuropeanParliamentActors,
     EuTransparencyActors,
     EuWhoisWhoActors,
+    LiveActorSources,
     LobbyregisterActors,
 )
 
@@ -184,3 +187,202 @@ async def test_transparency_register_searches_cached_public_snapshot(tmp_path: P
     assert records[0].provider_id == "123456789-10"
     assert records[0].display_name == "Digital Public Services Alliance"
     assert records[0].disclosures[0].spending_range == "50,000 to 99,999 Euro"
+
+
+TRANSPARENCY_XML_11 = """<?xml version='1.1' encoding='UTF-8'?>
+<ListOfIRPublicDetail xmlns="http://intragate.ec.europa.eu/transparencyregister/odp">
+  <metaData xmlns=""><exportDate>2026-09-15T20:00:00.070+00:00</exportDate></metaData>
+  <resultList xmlns="">
+    <interestRepresentative>
+      <identificationCode>111-01</identificationCode>
+      <name><originalName>Hydrogen Mobility Club</originalName></name>
+      <goals>Works with BASF&#x2;suppliers on fuel cells</goals>
+      <interests><interest><name>Energy</name></interest></interests>
+      <financialData><closedYear><contributions><contributor>
+        <name>Contributor that must not appear</name>
+      </contributor></contributions></closedYear></financialData>
+    </interestRepresentative>
+    <interestRepresentative>
+      <identificationCode>222-02</identificationCode>
+      <lastUpdateDate>2026-09-10T11:41:14.144+00:00</lastUpdateDate>
+      <name><originalName>BASF SE</originalName></name>
+      <goals>Chemistry</goals>
+    </interestRepresentative>
+  </resultList>
+</ListOfIRPublicDetail>
+"""
+
+
+async def test_transparency_snapshot_accepts_xml_11_references_and_ranks_names_first(
+    tmp_path: Path,
+) -> None:
+    snapshot = tmp_path / "eu-transparency.xml"
+    snapshot.write_text(TRANSPARENCY_XML_11)
+
+    async with httpx.AsyncClient() as http:
+        records = await EuTransparencyActors(
+            http, cache_path=snapshot, resolver=public_resolver
+        ).search("BASF", kind="interest_representative", language="en", limit=5)
+
+    assert [record.display_name for record in records] == ["BASF SE", "Hydrogen Mobility Club"]
+    assert "Contributor" not in records[1].disclosures[0].wording
+    assert records[0].source_modified_at == "2026-09-10T11:41:14.144+00:00"
+    assert records[1].source_modified_at == "2026-09-15T20:00:00.070+00:00"
+
+
+@respx.mock
+async def test_transparency_snapshot_download_follows_the_official_redirect(
+    tmp_path: Path,
+) -> None:
+    respx.get("https://transparency-register.europa.eu/odplastorganisationxml_en").mock(
+        return_value=httpx.Response(
+            301,
+            headers={
+                "location": (
+                    "https://ec.europa.eu/transparencyregister/public/files/ODP/download/XML/latest"
+                )
+            },
+        )
+    )
+    respx.get(
+        "https://ec.europa.eu/transparencyregister/public/files/ODP/download/XML/latest"
+    ).mock(return_value=httpx.Response(200, text=TRANSPARENCY_XML_11))
+    snapshot = tmp_path / "snapshots" / "eu-transparency.xml"
+
+    async with httpx.AsyncClient() as http:
+        records = await EuTransparencyActors(
+            http, cache_path=snapshot, resolver=public_resolver
+        ).search("BASF SE", kind="interest_representative", language="de", limit=5)
+
+    assert [record.provider_id for record in records] == ["222-02"]
+    assert snapshot.is_file()
+
+
+@respx.mock
+async def test_ep_institution_detail_reads_json_ld_names_and_validity() -> None:
+    respx.get("https://data.europarl.europa.eu/api/v2/corporate-bodies").mock(
+        return_value=httpx.Response(
+            200,
+            json={"data": [{"identifier": "1041", "type": "Organization", "label": "BUDG"}]},
+        )
+    )
+    respx.get("https://data.europarl.europa.eu/api/v2/corporate-bodies/1041").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "identifier": "1041",
+                        "label": "BUDG",
+                        "prefLabel": {"de": "Haushaltsausschuss", "en": "Committee on Budgets"},
+                        "altLabel": {"de": "Haushalt", "en": "Budgets"},
+                        "classification": "def/ep-entities/COMMITTEE_PARLIAMENTARY_STANDING",
+                        "temporal": {"startDate": "2024-07-16"},
+                    }
+                ]
+            },
+        )
+    )
+
+    async with httpx.AsyncClient() as http:
+        records = await EuropeanParliamentActors(http, resolver=public_resolver).search(
+            "BUDG", kind="institution", language="de", limit=5
+        )
+
+    assert records[0].display_name == "Haushaltsausschuss"
+    assert records[0].alternative_names == ("BUDG", "Haushalt", "Budgets")
+    assert "valid from 2024-07-16" in records[0].description
+    assert records[0].source_modified_at is None
+
+
+@respx.mock
+async def test_live_sources_interleave_answering_sources(tmp_path: Path) -> None:
+    respx.get("https://www.lobbyregister.bundestag.de/suche").mock(
+        return_value=httpx.Response(
+            200,
+            text="".join(
+                f'<h4 id="common-search-result-list-item-R00000{index}">'
+                f'<a href="/suche/R00000{index}/1?backUrl=%2Fsuche">BASF {index}</a></h4>'
+                for index in (1, 2)
+            ),
+        )
+    )
+    snapshot = tmp_path / "eu-transparency.xml"
+    snapshot.write_text(TRANSPARENCY_XML_11)
+
+    result = await LiveActorSources(resolver=public_resolver, transparency_cache=snapshot).search(
+        "BASF",
+        scope="BOTH",
+        kind="interest_representative",
+        source=None,
+        language="de",
+        limit=5,
+    )
+
+    assert [record.source for record in result.records] == [
+        "lobbyregister",
+        "eu_transparency",
+        "lobbyregister",
+        "eu_transparency",
+    ]
+    assert (
+        result.records[0].official_url == "https://www.lobbyregister.bundestag.de/suche/R000001/1"
+    )
+    assert result.records[0].source_modified_at is None
+
+
+async def test_live_sources_reject_combinations_without_a_connected_source() -> None:
+    with pytest.raises(ActorSearchUnsupportedError, match="European Parliament"):
+        await LiveActorSources(resolver=public_resolver).search(
+            "Friedrich Merz",
+            scope="DE",
+            kind="person",
+            source=None,
+            language="de",
+            limit=5,
+        )
+
+
+@respx.mock
+async def test_ep_roles_name_bodies_by_official_acronym(monkeypatch: pytest.MonkeyPatch) -> None:
+    import policy_mcp.adapters.actors as actors_module
+
+    monkeypatch.setattr(actors_module, "_EP_BODY_NAMES", {})
+    monkeypatch.setattr(actors_module, "_EP_BODY_NAMES_LOADED_AT", None)
+    respx.get("https://data.europarl.europa.eu/api/v2/meps").mock(
+        return_value=httpx.Response(200, text=EP_LIST)
+    )
+    respx.get("https://data.europarl.europa.eu/api/v2/meps/1077").mock(
+        return_value=httpx.Response(
+            200,
+            text=EP_DETAIL.replace("org/ep-3", "org/605").replace(
+                "ep-roles/MEMBER_PARLIAMENT", "ep-roles/MEMBER"
+            ),
+        )
+    )
+    respx.get("https://data.europarl.europa.eu/api/v2/corporate-bodies").mock(
+        return_value=httpx.Response(
+            200,
+            text="""<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+ xmlns:rdfs="http://www.w3.org/2000/01/rdf-schema#"
+ xmlns:dcterms="http://purl.org/dc/terms/" xmlns:org="http://www.w3.org/ns/org#">
+  <org:Organization rdf:about="https://data.europarl.europa.eu/org/605">
+    <rdfs:label>ECON</rdfs:label>
+    <org:classification
+      rdf:resource="https://data.europarl.europa.eu/def/ep-entities/COMMITTEE_PARLIAMENTARY_STANDING"/>
+    <dcterms:identifier>605</dcterms:identifier>
+  </org:Organization>
+</rdf:RDF>
+""",
+        )
+    )
+
+    async with httpx.AsyncClient() as http:
+        records = await EuropeanParliamentActors(http, resolver=public_resolver).search(
+            "Friedrich Merz", kind="person", language="de", limit=5
+        )
+
+    assert records[0].roles[0].organisation_name == (
+        "European Parliament committee parliamentary standing ECON"
+    )

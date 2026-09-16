@@ -9,12 +9,12 @@ import json
 import logging
 import re
 import time
-from collections.abc import Sequence
+from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, BinaryIO, Literal, Protocol
 from urllib.parse import urljoin, urlsplit
 from xml.etree.ElementTree import Element
 
@@ -35,11 +35,20 @@ WHOISWHO_SPARQL = "https://publications.europa.eu/webapi/rdf/sparql"
 TRANSPARENCY_XML = "https://transparency-register.europa.eu/odplastorganisationxml_en"
 TRANSPARENCY_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
 MAX_PROVIDER_CALLS = 6
+SOURCE_TIME_BUDGET_SECONDS = 40.0
 LOGGER = logging.getLogger(__name__)
+_SNAPSHOT_DOWNLOADS: dict[Path, asyncio.Task[None]] = {}
+EP_BODY_NAMES_MAX_AGE_SECONDS = 24 * 60 * 60
+_EP_BODY_NAMES: dict[str, str] = {}
+_EP_BODY_NAMES_LOADED_AT: float | None = None
 
 
 class ActorProviderError(RuntimeError):
     """A redacted live-source failure safe to expose to the actor catalog."""
+
+
+class ActorSearchUnsupportedError(ValueError):
+    """No connected official source covers the requested scope and actor kind."""
 
 
 class _FrozenModel(BaseModel):
@@ -86,7 +95,7 @@ class ActorSourceRecord(_FrozenModel):
     alternative_names: tuple[str, ...] = ()
     description: str
     official_url: str
-    source_modified_at: str
+    source_modified_at: str | None = None
     observation_state: Literal["present"] = "present"
     historical_supported: bool
     roles: tuple[SourceRole, ...] = ()
@@ -156,7 +165,6 @@ class EuropeanParliamentActors:
         language: Literal["de", "en"],
         limit: int,
     ) -> tuple[ActorSourceRecord, ...]:
-        del language
         if kind not in {"person", "institution"}:
             return ()
         endpoint = "meps" if kind == "person" else "corporate-bodies"
@@ -193,10 +201,74 @@ class EuropeanParliamentActors:
                 )
                 calls += 1
                 if detail.status_code == 200:
-                    records.append(self._detail_record(detail.content, kind=kind))
-                    continue
+                    try:
+                        records.append(self._detail(detail.content, kind=kind, language=language))
+                        continue
+                    except ActorProviderError as error:
+                        LOGGER.warning("European Parliament detail unreadable (%s)", error)
             records.append(self._summary_record(provider_id, label, kind=kind))
+        if any(
+            not role.organisation_id.startswith("ep-")
+            for record in records
+            for role in record.roles
+        ):
+            records = await self._name_bodies(records)
         return tuple(records)
+
+    async def _name_bodies(self, records: list[ActorSourceRecord]) -> list[ActorSourceRecord]:
+        """Replace numeric body identifiers with the official acronym and body type."""
+        global _EP_BODY_NAMES_LOADED_AT
+        if (
+            _EP_BODY_NAMES_LOADED_AT is None
+            or time.monotonic() - _EP_BODY_NAMES_LOADED_AT > EP_BODY_NAMES_MAX_AGE_SECONDS
+        ):
+            try:
+                response = await self._http.get(
+                    f"{EP_API}/corporate-bodies",
+                    params={"offset": 0, "limit": 5_000},
+                    headers={"Accept": "application/rdf+xml"},
+                )
+                if response.status_code != 200:
+                    raise ActorProviderError("European Parliament body listing failed")
+                _EP_BODY_NAMES.clear()
+                _EP_BODY_NAMES.update(self._body_names(response.content))
+                _EP_BODY_NAMES_LOADED_AT = time.monotonic()
+            except (ActorProviderError, SourceRequestError) as error:
+                LOGGER.warning("European Parliament body names unavailable (%s)", error)
+                return records
+        return [
+            record.model_copy(
+                update={
+                    "roles": tuple(
+                        role.model_copy(
+                            update={"organisation_name": _EP_BODY_NAMES[role.organisation_id]}
+                        )
+                        if role.organisation_id in _EP_BODY_NAMES
+                        and not role.organisation_id.startswith("ep-")
+                        else role
+                        for role in record.roles
+                    )
+                }
+            )
+            for record in records
+        ]
+
+    @staticmethod
+    def _body_names(content: bytes) -> dict[str, str]:
+        try:
+            root = ElementTree.fromstring(content)
+        except ElementTree.ParseError as error:
+            raise ActorProviderError("European Parliament returned invalid body XML") from error
+        names: dict[str, str] = {}
+        for item in root.findall(".//{*}Organization"):
+            provider_id = _direct_xml_text(item, "identifier")
+            label = _direct_xml_text(item, "label")
+            if provider_id is None or label is None:
+                continue
+            classification = _resource_tail(item.find("./{*}classification"))
+            kind = classification.replace("_", " ").lower() if classification else "body"
+            names[provider_id] = f"European Parliament {kind} {label}"
+        return names
 
     @staticmethod
     def _listing(content: bytes, *, element_name: str) -> list[tuple[str, str]]:
@@ -246,8 +318,71 @@ class EuropeanParliamentActors:
                 else "Published European Parliament body."
             ),
             official_url=f"https://data.europarl.europa.eu/{path}/{provider_id}",
-            source_modified_at=_now(),
             historical_supported=True,
+        )
+
+    def _detail(
+        self,
+        content: bytes,
+        *,
+        kind: Literal["person", "institution"],
+        language: Literal["de", "en"],
+    ) -> ActorSourceRecord:
+        # The corporate-bodies detail route answers JSON-LD even when RDF/XML is requested.
+        if content.lstrip().startswith(b"{"):
+            return self._json_detail_record(content, kind=kind, language=language)
+        return self._detail_record(content, kind=kind)
+
+    def _json_detail_record(
+        self,
+        content: bytes,
+        *,
+        kind: Literal["person", "institution"],
+        language: Literal["de", "en"],
+    ) -> ActorSourceRecord:
+        try:
+            payload = json.loads(content)
+        except ValueError as error:
+            raise ActorProviderError("European Parliament returned invalid detail JSON") from error
+        data = payload.get("data") if isinstance(payload, dict) else None
+        item = data[0] if isinstance(data, list) and data and isinstance(data[0], dict) else None
+        if item is None:
+            raise ActorProviderError("European Parliament detail omitted its actor")
+        provider_id = item.get("identifier")
+        label = item.get("label")
+        if not isinstance(provider_id, str | int) or not isinstance(label, str):
+            raise ActorProviderError("European Parliament detail omitted its identity")
+        preferred = item.get("prefLabel") if isinstance(item.get("prefLabel"), dict) else {}
+        alternative = item.get("altLabel") if isinstance(item.get("altLabel"), dict) else {}
+        name = preferred.get(language) or preferred.get("en") or label
+        alternative_names = tuple(
+            dict.fromkeys(
+                value
+                for value in (label, alternative.get(language), alternative.get("en"))
+                if isinstance(value, str) and value and value != name
+            )
+        )
+        summary = self._summary_record(str(provider_id), str(name), kind=kind)
+        if kind != "institution":
+            return summary.model_copy(update={"alternative_names": alternative_names})
+        classification = str(item.get("classification", "")).rsplit("/", 1)[-1]
+        temporal = item.get("temporal") if isinstance(item.get("temporal"), dict) else {}
+        start, end = temporal.get("startDate"), temporal.get("endDate")
+        period = f"{start} to {end}" if start and end else f"from {start}" if start else ""
+        details = ", ".join(
+            part
+            for part in (
+                classification.replace("_", " ").capitalize() if classification else "",
+                f"valid {period}" if period else "",
+            )
+            if part
+        )
+        return summary.model_copy(
+            update={
+                "alternative_names": alternative_names,
+                "description": "Published European Parliament body"
+                + (f" ({details})." if details else "."),
+            }
         )
 
     def _detail_record(
@@ -356,7 +491,7 @@ class _LobbySearchParser(HTMLParser):
         if self._current is not None and tag == "a" and "url" not in self._current:
             href = values.get("href")
             if href and href.startswith("/suche/"):
-                self._current["url"] = urljoin(LOBBYREGISTER_SEARCH, href)
+                self._current["url"] = urljoin(LOBBYREGISTER_SEARCH, href.split("?", 1)[0])
                 self._in_title_link = True
 
     def handle_endtag(self, tag: str) -> None:
@@ -457,7 +592,7 @@ class LobbyregisterActors:
             text,
         )
         modified_match = re.search(r"Letzte Änderung:\s*(\d{2}\.\d{2}\.\d{4})", text)
-        modified = _now()
+        modified = None
         if modified_match:
             with suppress(ValueError):
                 modified = (
@@ -530,7 +665,6 @@ SELECT DISTINCT ?person ?given ?family WHERE {{
             raise ActorProviderError("EU WhoisWho search failed")
         rows = csv.DictReader(io.StringIO(response.text))
         records: list[ActorSourceRecord] = []
-        observed_at = _now()
         for row in rows:
             uri = row.get("person", "").strip()
             family = row.get("family", "").strip()
@@ -551,7 +685,6 @@ SELECT DISTINCT ?person ?given ?family WHERE {{
                     display_name=" ".join(item for item in (given, family) if item),
                     description="Published identity in the official EU directory.",
                     official_url=uri,
-                    source_modified_at=observed_at,
                     historical_supported=False,
                 )
             )
@@ -574,12 +707,57 @@ def _child_text(element: Element, path: str) -> str | None:
     return text or None
 
 
-def _descendant_texts(element: Element, name: str) -> tuple[str, ...]:
+def _interest_area_names(element: Element) -> tuple[str, ...]:
+    interests = next((child for child in element if _local_name(child.tag) == "interests"), None)
+    if interests is None:
+        return ()
     return tuple(
-        child.text.strip()
-        for child in element.iter()
-        if _local_name(child.tag) == name and child.text and child.text.strip()
+        text
+        for interest in interests
+        if _local_name(interest.tag) == "interest"
+        and (text := _child_text(interest, "name")) is not None
     )
+
+
+_CHARACTER_REFERENCE = re.compile(rb"&#(x[0-9a-fA-F]{1,8}|[0-9]{1,10});")
+
+
+def _xml10_reference(match: re.Match[bytes]) -> bytes:
+    value = match.group(1)
+    codepoint = int(value[1:], 16) if value.startswith(b"x") else int(value)
+    valid = (
+        codepoint in {0x9, 0xA, 0xD}
+        or 0x20 <= codepoint <= 0xD7FF
+        or 0xE000 <= codepoint <= 0xFFFD
+        or 0x10000 <= codepoint <= 0x10FFFF
+    )
+    return match.group(0) if valid else b" "
+
+
+class _Xml10ReferenceFilter:
+    """Replace XML 1.1 character references that XML 1.0 parsers reject."""
+
+    def __init__(self, raw: BinaryIO) -> None:
+        self._raw = raw
+        self._pending = b""
+
+    def read(self, size: int = -1) -> bytes:
+        while True:
+            chunk = self._raw.read(size if size > 0 else 65_536)
+            data = self._pending + chunk
+            self._pending = b""
+            if chunk:
+                cut = data.rfind(b"&")
+                if cut >= 0 and b";" not in data[cut:] and len(data) - cut < 16:
+                    self._pending = data[cut:]
+                    data = data[:cut]
+                if not data:
+                    continue
+            return _CHARACTER_REFERENCE.sub(_xml10_reference, data)
+
+
+def _default_download_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
 
 
 class EuTransparencyActors:
@@ -593,27 +771,48 @@ class EuTransparencyActors:
         *,
         cache_path: Path | None = None,
         resolver: Resolver = resolve_host,
+        download_client: Callable[[], httpx.AsyncClient] = _default_download_client,
     ) -> None:
-        self._http = BoundedHttpClient(
-            client,
-            allowed_hosts={"transparency-register.europa.eu"},
-            resolver=resolver,
-            max_response_bytes=200_000_000,
-        )
+        del client
+        self._resolver = resolver
+        self._download_client = download_client
         self._cache_path = cache_path or data_directory() / "snapshots" / "eu-transparency.xml"
 
+    async def _download(self) -> None:
+        async with self._download_client() as client:
+            http = BoundedHttpClient(
+                client,
+                allowed_hosts={"transparency-register.europa.eu", "ec.europa.eu"},
+                resolver=self._resolver,
+                max_response_bytes=400_000_000,
+            )
+            await http.download(TRANSPARENCY_XML, self._cache_path)
+
+    def _refresh(self) -> asyncio.Task[None]:
+        """Start one shared background download that outlives a timed-out tool call."""
+        task = _SNAPSHOT_DOWNLOADS.get(self._cache_path)
+        if task is None or task.done():
+            task = asyncio.get_running_loop().create_task(self._download())
+            _SNAPSHOT_DOWNLOADS[self._cache_path] = task
+            task.add_done_callback(_log_download_failure)
+        return task
+
     async def _snapshot(self) -> Path:
+        cached = self._cache_path.is_file()
         if (
-            self._cache_path.is_file()
+            cached
             and time.time() - self._cache_path.stat().st_mtime < TRANSPARENCY_CACHE_MAX_AGE_SECONDS
         ):
             return self._cache_path
         self._cache_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        task = self._refresh()
+        if cached:
+            # Serve the previous daily snapshot while the new one downloads.
+            return self._cache_path
         try:
-            await self._http.download(TRANSPARENCY_XML, self._cache_path)
-        except (SourceRequestError, httpx.HTTPError) as error:
-            if not self._cache_path.is_file():
-                raise ActorProviderError("EU Transparency Register download failed") from error
+            await asyncio.shield(task)
+        except (SourceRequestError, httpx.HTTPError, OSError) as error:
+            raise ActorProviderError("EU Transparency Register download failed") from error
         return self._cache_path
 
     async def search(
@@ -632,32 +831,37 @@ class EuTransparencyActors:
     def _search_snapshot(
         self, path: Path, query: str, language: Literal["de", "en"], limit: int
     ) -> tuple[ActorSourceRecord, ...]:
-        export_date = _now()
-        records: list[ActorSourceRecord] = []
+        export_date: str | None = None
+        name_matches: list[ActorSourceRecord] = []
+        text_matches: list[ActorSourceRecord] = []
         try:
-            iterator = ElementTree.iterparse(path, events=("end",))
-            for _, element in iterator:
-                name = _local_name(element.tag)
-                if name == "metaData":
-                    export_date = _child_text(element, "exportDate") or export_date
+            with path.open("rb") as raw:
+                iterator = ElementTree.iterparse(_Xml10ReferenceFilter(raw), events=("end",))
+                for _, element in iterator:
+                    name = _local_name(element.tag)
+                    if name == "metaData":
+                        export_date = _child_text(element, "exportDate") or export_date
+                        element.clear()
+                        continue
+                    if name != "interestRepresentative":
+                        continue
+                    matched = self._record(
+                        element,
+                        query=query,
+                        language=language,
+                        export_date=export_date,
+                        include_text_matches=len(text_matches) < limit,
+                    )
                     element.clear()
-                    continue
-                if name != "interestRepresentative":
-                    continue
-                record = self._record(
-                    element,
-                    query=query,
-                    language=language,
-                    export_date=export_date,
-                )
-                element.clear()
-                if record is not None:
-                    records.append(record)
-                    if len(records) >= limit:
+                    if matched is None:
+                        continue
+                    record, by_name = matched
+                    (name_matches if by_name else text_matches).append(record)
+                    if len(name_matches) >= limit:
                         break
         except (ElementTree.ParseError, OSError) as error:
             raise ActorProviderError("EU Transparency Register snapshot is invalid") from error
-        return tuple(records)
+        return tuple([*name_matches, *text_matches][:limit])
 
     def _record(
         self,
@@ -665,20 +869,22 @@ class EuTransparencyActors:
         *,
         query: str,
         language: Literal["de", "en"],
-        export_date: str,
-    ) -> ActorSourceRecord | None:
+        export_date: str | None,
+        include_text_matches: bool = True,
+    ) -> tuple[ActorSourceRecord, bool] | None:
         provider_id = _child_text(element, "identificationCode")
         display_name = _child_text(element, "name/originalName")
         if provider_id is None or display_name is None:
             return None
         acronym = _child_text(element, "acronym")
+        by_name = _terms_match(query, display_name, acronym or "")
+        if not by_name and not include_text_matches:
+            return None
         goals = _child_text(element, "goals") or ""
         proposals = _child_text(element, "EULegislativeProposals") or ""
         activities = _child_text(element, "communicationActivities") or ""
-        interests = _descendant_texts(element, "name")
-        if not _terms_match(
-            query, display_name, acronym or "", goals, proposals, activities, *interests
-        ):
+        interests = _interest_area_names(element)
+        if not by_name and not _terms_match(query, goals, proposals, activities, *interests):
             return None
         category = _child_text(element, "registrationCategory")
         lower_text = _child_text(element, "financialData/closedYear/costs/range/min")
@@ -700,7 +906,7 @@ class EuTransparencyActors:
             evidence_provider_id=f"{provider_id}-declaration",
         )
         modified = _child_text(element, "lastUpdateDate") or export_date
-        return ActorSourceRecord(
+        record = ActorSourceRecord(
             key=f"eu_transparency:interest_representative:{provider_id}",
             kind="interest_representative",
             scope=Jurisdiction.EU,
@@ -717,22 +923,78 @@ class EuTransparencyActors:
             historical_supported=False,
             disclosures=(disclosure,),
         )
+        return record, by_name
+
+
+def _log_download_failure(task: asyncio.Task[None]) -> None:
+    if task.cancelled() or task.exception() is None:
+        return
+    LOGGER.warning(
+        "EU Transparency Register snapshot download failed (%s)",
+        type(task.exception()).__name__,
+    )
+
+
+SOURCE_KINDS: dict[str, tuple[Literal["DE", "EU"], frozenset[str]]] = {
+    "ep": ("EU", frozenset({"person", "institution"})),
+    "eu_whoiswho": ("EU", frozenset({"person"})),
+    "lobbyregister": ("DE", frozenset({"interest_representative"})),
+    "eu_transparency": ("EU", frozenset({"interest_representative"})),
+}
+
+
+def select_sources(
+    *, scope: Literal["DE", "EU", "BOTH"], kind: ActorKind, source: str | None
+) -> list[str]:
+    """Return the connected sources that can answer one scope, kind, and source filter."""
+    return [
+        name
+        for name, (jurisdiction, kinds) in SOURCE_KINDS.items()
+        if (source is None or source == name)
+        and (scope == "BOTH" or scope == jurisdiction)
+        and kind in kinds
+    ]
+
+
+def source_coverage_hint(kind: ActorKind) -> str:
+    """Describe which connected sources cover one actor kind."""
+    names = {
+        "ep": "European Parliament (EU)",
+        "eu_whoiswho": "EU WhoisWho (EU)",
+        "lobbyregister": "German Lobbyregister (DE)",
+        "eu_transparency": "EU Transparency Register (EU)",
+    }
+    covered = [names[name] for name, (_, kinds) in SOURCE_KINDS.items() if kind in kinds]
+    return f"kind={kind} is covered by: {', '.join(covered)}."
+
+
+class _ActorProvider(Protocol):
+    async def search(
+        self,
+        query: str,
+        *,
+        kind: ActorKind,
+        language: Literal["de", "en"],
+        limit: int,
+    ) -> tuple[ActorSourceRecord, ...]: ...
 
 
 class LiveActorSources:
     """Fan out one actor search to relevant public sources without user setup."""
 
-    ready_sources = frozenset({"ep", "eu_whoiswho", "lobbyregister", "eu_transparency"})
+    ready_sources = frozenset(SOURCE_KINDS)
 
     def __init__(
         self,
         *,
         resolver: Resolver = resolve_host,
         timeout_seconds: float = 120.0,
+        source_time_budget_seconds: float = SOURCE_TIME_BUDGET_SECONDS,
         transparency_cache: Path | None = None,
     ) -> None:
         self._resolver = resolver
         self._timeout = httpx.Timeout(timeout_seconds, connect=min(timeout_seconds, 10.0))
+        self._budget = source_time_budget_seconds
         self._transparency_cache = transparency_cache
 
     async def search(
@@ -745,47 +1007,36 @@ class LiveActorSources:
         language: Literal["de", "en"],
         limit: int,
     ) -> ActorSourceSearchResult:
-        async with httpx.AsyncClient(timeout=self._timeout) as http:
-            providers: Sequence[tuple[str, object]] = (
-                ("ep", EuropeanParliamentActors(http, resolver=self._resolver)),
-                ("eu_whoiswho", EuWhoisWhoActors(http, resolver=self._resolver)),
-                ("lobbyregister", LobbyregisterActors(http, resolver=self._resolver)),
-                (
-                    "eu_transparency",
-                    EuTransparencyActors(
-                        http,
-                        cache_path=self._transparency_cache,
-                        resolver=self._resolver,
-                    ),
-                ),
+        names = select_sources(scope=scope, kind=kind, source=source)
+        if not names:
+            raise ActorSearchUnsupportedError(
+                f"No connected official source covers kind={kind} with scope={scope}"
+                + (f" and source={source}" if source else "")
+                + f". {source_coverage_hint(kind)}"
             )
-            selected = [
-                (name, provider)
-                for name, provider in providers
-                if (source is None or source == name)
-                and (
-                    scope == "BOTH"
-                    or (scope == "DE" and name == "lobbyregister")
-                    or (scope == "EU" and name != "lobbyregister")
-                )
-                and (
-                    (kind == "person" and name in {"ep", "eu_whoiswho"})
-                    or (kind == "institution" and name == "ep")
-                    or (
-                        kind == "interest_representative"
-                        and name in {"lobbyregister", "eu_transparency"}
-                    )
-                )
-            ]
+        async with httpx.AsyncClient(timeout=self._timeout) as http:
+            providers: dict[str, _ActorProvider] = {
+                "ep": EuropeanParliamentActors(http, resolver=self._resolver),
+                "eu_whoiswho": EuWhoisWhoActors(http, resolver=self._resolver),
+                "lobbyregister": LobbyregisterActors(http, resolver=self._resolver),
+                "eu_transparency": EuTransparencyActors(
+                    http,
+                    cache_path=self._transparency_cache,
+                    resolver=self._resolver,
+                ),
+            }
             tasks = [
-                provider.search(query, kind=kind, language=language, limit=limit)  # type: ignore[attr-defined]
-                for _, provider in selected
+                asyncio.wait_for(
+                    providers[name].search(query, kind=kind, language=language, limit=limit),
+                    timeout=self._budget,
+                )
+                for name in names
             ]
             outcomes = await asyncio.gather(*tasks, return_exceptions=True)
-        records: list[ActorSourceRecord] = []
+        per_source: list[tuple[ActorSourceRecord, ...]] = []
         successful: list[str] = []
         failures: dict[str, str] = {}
-        for (name, _), outcome in zip(selected, outcomes, strict=True):
+        for name, outcome in zip(names, outcomes, strict=True):
             if isinstance(outcome, asyncio.CancelledError):
                 raise outcome
             if isinstance(outcome, BaseException):
@@ -795,10 +1046,26 @@ class LiveActorSources:
                     causes.append(type(current).__name__)
                     current = current.__cause__
                 LOGGER.warning("Actor source %s unavailable (%s)", name, " <- ".join(causes))
-                failures[name] = "Official source request failed"
+                if isinstance(outcome, TimeoutError) and name == "eu_transparency":
+                    failures[name] = (
+                        "The EU Transparency Register snapshot (about 120 MB) is still "
+                        "downloading. Retry in about a minute."
+                    )
+                elif isinstance(outcome, TimeoutError):
+                    failures[name] = f"The source did not answer within {self._budget:.0f} seconds."
+                else:
+                    failures[name] = "The official source request failed."
                 continue
             successful.append(name)
-            records.extend(outcome)
+            per_source.append(outcome)
+        # Interleave sources so the first bounded page shows every answering source.
+        records = [
+            record
+            for rank in range(max((len(items) for items in per_source), default=0))
+            for items in per_source
+            if rank < len(items)
+            for record in (items[rank],)
+        ]
         return ActorSourceSearchResult(
             records=tuple(records[:1_000]),
             successful_sources=tuple(successful),

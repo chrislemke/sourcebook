@@ -143,6 +143,13 @@ SCHEMA_STATEMENTS = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS actor_observations (
+        actor_key TEXT PRIMARY KEY,
+        payload_json TEXT NOT NULL,
+        retrieved_at TEXT NOT NULL
+    )
+    """,
+    """
     CREATE VIRTUAL TABLE IF NOT EXISTS record_search USING fts5(
         record_id UNINDEXED,
         title,

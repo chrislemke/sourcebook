@@ -85,10 +85,22 @@ class GovDataClient:
             raise ProviderResponseError("GovData package metadata omitted its identity")
         organization = value.get("organization")
         publisher = organization.get("title") if isinstance(organization, dict) else None
+        raw_extras = value.get("extras")
+        extras = {
+            item["key"]: item["value"]
+            for item in (raw_extras if isinstance(raw_extras, list) else [])
+            if isinstance(item, dict)
+            and isinstance(item.get("key"), str)
+            and isinstance(item.get("value"), str)
+        }
+        if not isinstance(publisher, str) or not publisher:
+            publisher = extras.get("publisher_name")
         resources = value.get("resources", [])
         if not isinstance(resources, list):
             raise ProviderResponseError("GovData package resources are invalid")
         distributions: list[CatalogueDistribution] = []
+        # DCAT-AP.de publishes licences per distribution, so the package field is often empty.
+        distribution_licences: list[str] = []
         for resource in resources:
             if not isinstance(resource, dict):
                 raise ProviderResponseError("GovData returned an invalid distribution")
@@ -96,6 +108,8 @@ class GovDataClient:
             url = resource.get("url")
             if not isinstance(resource_id, str) or not isinstance(url, str):
                 raise ProviderResponseError("GovData distribution omitted its identity")
+            if isinstance(resource.get("license"), str) and resource["license"]:
+                distribution_licences.append(resource["license"])
             distributions.append(
                 CatalogueDistribution(
                     provider_id=resource_id,
@@ -116,7 +130,11 @@ class GovDataClient:
                 if isinstance(value.get("metadata_modified"), str)
                 else None
             ),
-            licence=(value.get("license_id") if isinstance(value.get("license_id"), str) else None),
+            licence=(
+                value["license_id"]
+                if isinstance(value.get("license_id"), str) and value["license_id"]
+                else "; ".join(dict.fromkeys(distribution_licences)) or None
+            ),
             distributions=tuple(distributions),
         )
 

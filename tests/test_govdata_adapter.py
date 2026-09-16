@@ -110,3 +110,41 @@ async def test_get_retrieves_one_selected_package() -> None:
     assert dict(route.calls[0].request.url.params) == {"id": "budget-data"}
     assert record.provider_id == "budget-data"
     assert record.distributions == ()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_dcat_distribution_licences_and_publisher_extras_fill_empty_package_fields() -> None:
+    respx.get("https://www.govdata.de/ckan/api/3/action/package_show").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "success": True,
+                "result": {
+                    "name": "bundeshaushalt-2011",
+                    "title": "Bundeshaushalt 2011",
+                    "license_id": "",
+                    "organization": None,
+                    "extras": [{"key": "publisher_name", "value": "Bundesministerium"}],
+                    "resources": [
+                        {
+                            "id": "zip-1",
+                            "url": "https://example.gov/plan.zip",
+                            "license": "http://dcat-ap.de/def/licenses/dl-by-de/2.0",
+                        },
+                        {
+                            "id": "zip-2",
+                            "url": "https://example.gov/plan-2.zip",
+                            "license": "http://dcat-ap.de/def/licenses/dl-by-de/2.0",
+                        },
+                    ],
+                },
+            },
+        )
+    )
+
+    async with httpx.AsyncClient() as http:
+        record = await GovDataClient(http, resolver=public_resolver).get("bundeshaushalt-2011")
+
+    assert record.licence == "http://dcat-ap.de/def/licenses/dl-by-de/2.0"
+    assert record.publisher == "Bundesministerium"
