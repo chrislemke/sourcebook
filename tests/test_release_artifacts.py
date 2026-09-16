@@ -57,11 +57,7 @@ def package_binaries(packages: Path, profile: Profile, extracted: Path) -> list[
         packages / "claude-code-plugin" / "policy-research" / "bin" / binary_name,
         packages / "openai-agent-plugin" / "policy-research" / "bin" / binary_name,
     ]
-    bundle = (
-        packages
-        / "claude-desktop"
-        / f"{profile.server_name}-{__version__}-{TARGET}.mcpb"
-    )
+    bundle = packages / "claude-desktop" / f"{profile.server_name}-{__version__}-{TARGET}.mcpb"
     destination = extracted / profile.value
     with zipfile.ZipFile(bundle) as archive:
         archive.extractall(destination)
@@ -69,6 +65,27 @@ def package_binaries(packages: Path, profile: Profile, extracted: Path) -> list[
     bundled_binary.chmod(0o555)
     candidates.append(bundled_binary)
     return candidates
+
+
+def make_tree_read_only(root: Path) -> None:
+    for path in root.rglob("*"):
+        if path.is_file():
+            executable = path.name in {"policy-mcp", "policy-mcp.exe"}
+            path.chmod(0o555 if executable else 0o444)
+    for path in sorted(
+        (path for path in root.rglob("*") if path.is_dir()),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    ):
+        path.chmod(0o555)
+    root.chmod(0o555)
+
+
+def make_tree_writable(root: Path) -> None:
+    root.chmod(0o755)
+    for path in root.rglob("*"):
+        if path.is_dir():
+            path.chmod(0o755)
 
 
 @pytest.mark.parametrize("profile", list(Profile))
@@ -87,25 +104,70 @@ async def test_client_artifacts_preserve_the_direct_mcp_contract(
     shutil.copytree(packages, read_only_root)
     extracted = tmp_path / "extracted bundles"
     candidates = package_binaries(read_only_root, profile, extracted)
-    for candidate in candidates:
-        candidate.chmod(stat.S_IRUSR | stat.S_IXUSR)
+    make_tree_read_only(read_only_root)
+    make_tree_read_only(extracted)
+    try:
+        assert not stat.S_IMODE(read_only_root.stat().st_mode) & stat.S_IWUSR
+        assert not stat.S_IMODE(extracted.stat().st_mode) & stat.S_IWUSR
+        for candidate in candidates:
+            assert await capture_contract(candidate, profile, data_directory) == baseline
+    finally:
+        make_tree_writable(read_only_root)
+        make_tree_writable(extracted)
 
-    for candidate in candidates:
-        assert await capture_contract(candidate, profile, data_directory) == baseline
+
+def copy_artifact(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_dir():
+        shutil.copytree(source, destination)
+    else:
+        shutil.copy2(source, destination)
 
 
-def test_package_replacement_does_not_remove_shared_data(tmp_path: Path) -> None:
+def remove_artifact(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def test_package_lifecycle_does_not_remove_shared_data_or_credentials(tmp_path: Path) -> None:
     assert PACKAGED_ROOT is not None
-    package_copy = tmp_path / "disposable package"
+    packages = Path(PACKAGED_ROOT)
     shared_data = tmp_path / "persistent user data"
-    shutil.copytree(Path(PACKAGED_ROOT), package_copy)
     shared_data.mkdir()
     database = shared_data / "sourcebook.sqlite3"
     database.write_bytes(b"preserved")
+    external_credential_store = tmp_path / "operating system credential store"
+    external_credential_store.write_bytes(b"credential remains outside packages")
 
-    shutil.rmtree(package_copy)
+    artifacts = [
+        *sorted((packages / "claude-desktop").glob("*.mcpb")),
+        packages / "claude-code-plugin" / "policy-research",
+        packages / "openai-agent-plugin" / "policy-research",
+    ]
 
-    assert database.read_bytes() == b"preserved"
+    def assert_user_state() -> None:
+        assert database.read_bytes() == b"preserved"
+        assert external_credential_store.read_bytes() == (b"credential remains outside packages")
+
+    for index, artifact in enumerate(artifacts):
+        installed = tmp_path / "host packages" / str(index) / artifact.name
+        copy_artifact(artifact, installed)  # fresh install
+        assert_user_state()
+
+        remove_artifact(installed)
+        copy_artifact(artifact, installed)  # update/replacement
+        assert_user_state()
+
+        disabled = installed.with_name(f"{installed.name}.disabled")
+        installed.rename(disabled)
+        assert_user_state()
+        disabled.rename(installed)  # re-enable
+        assert_user_state()
+
+        remove_artifact(installed)  # uninstall
+        assert_user_state()
 
 
 def test_manifests_do_not_contain_credentials() -> None:
@@ -118,7 +180,14 @@ def test_manifests_do_not_contain_credentials() -> None:
         "EURLEX_PASSWORD",
     )
     for path in Path(PACKAGED_ROOT).rglob("*"):
-        if path.is_file() and path.suffix in {".json", ".mcpb"}:
-            content = path.read_bytes()
+        if not path.is_file() or path.suffix not in {".json", ".mcpb"}:
+            continue
+        contents = {path.name: path.read_bytes()}
+        if path.suffix == ".mcpb":
+            with zipfile.ZipFile(path) as archive:
+                contents = {member: archive.read(member) for member in archive.namelist()}
+        for member, content in contents.items():
             for value in forbidden:
-                assert value.encode() not in content, f"Found credential material in {path}"
+                assert value.encode() not in content, (
+                    f"Found credential material in {path}:{member}"
+                )

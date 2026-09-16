@@ -9,6 +9,11 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict
 
 from policy_mcp import __version__
+from policy_mcp.contracts import (
+    DIAGNOSTIC_TOOL_DESCRIPTION,
+    DIAGNOSTIC_TOOL_NAME,
+    DIAGNOSTIC_TOOL_TITLE,
+)
 from policy_mcp.profiles import Profile
 from policy_mcp.storage import data_directory, database_health
 
@@ -48,12 +53,9 @@ def create_server(profile: Profile | str) -> MCPServer[None]:
     )
 
     @server.tool(
-        name="policy_diagnostic",
-        title="Policy MCP diagnostic",
-        description=(
-            "Check this local profile and its shared data store without reading records or "
-            "contacting an upstream source."
-        ),
+        name=DIAGNOSTIC_TOOL_NAME,
+        title=DIAGNOSTIC_TOOL_TITLE,
+        description=DIAGNOSTIC_TOOL_DESCRIPTION,
         annotations=ToolAnnotations(
             read_only_hint=True,
             destructive_hint=False,

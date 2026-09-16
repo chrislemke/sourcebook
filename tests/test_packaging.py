@@ -8,6 +8,9 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from policy_mcp.contracts import DIAGNOSTIC_TOOL_DESCRIPTION, DIAGNOSTIC_TOOL_NAME
 from policy_mcp.packaging import build_packages
 
 
@@ -73,15 +76,52 @@ def test_builds_all_package_families_from_one_binary_and_skill(tmp_path: Path) -
     ).is_file()
 
 
-def test_package_archives_are_reproducible_and_contain_no_secrets(tmp_path: Path) -> None:
+def tree_snapshot(root: Path) -> dict[str, tuple[int, bytes]]:
+    return {
+        str(path.relative_to(root)): (stat.S_IMODE(path.stat().st_mode), path.read_bytes())
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+@pytest.mark.parametrize(
+    ("target", "platform", "binary_name"),
+    [
+        ("darwin-arm64", "darwin", "policy-mcp"),
+        ("windows-x64", "win32", "policy-mcp.exe"),
+    ],
+)
+def test_package_families_are_reproducible_and_contain_no_secrets(
+    tmp_path: Path,
+    target: str,
+    platform: str,
+    binary_name: str,
+) -> None:
     binary = tmp_path / "policy-mcp"
     make_binary(binary)
-    first = build_packages(binary, tmp_path / "first", target="windows-x64")
-    second = build_packages(binary, tmp_path / "second", target="windows-x64")
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first = build_packages(binary, first_root, target=target)
+    build_packages(binary, second_root, target=target)
+
+    assert tree_snapshot(first_root) == tree_snapshot(second_root)
 
     for profile in first.mcp_bundles:
-        first_bytes = first.mcp_bundles[profile].read_bytes()
-        second_bytes = second.mcp_bundles[profile].read_bytes()
-        assert first_bytes == second_bytes
-        assert b"seeded-test-secret" not in first_bytes
-        assert b"DIP_API_KEY" not in first_bytes
+        with zipfile.ZipFile(first.mcp_bundles[profile]) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+            expected_path = f"server/{binary_name}"
+            assert manifest["compatibility"]["platforms"] == [platform]
+            assert manifest["server"]["entry_point"] == expected_path
+            assert manifest["server"]["mcp_config"]["command"] == (
+                f"${{__dirname}}/{expected_path}"
+            )
+            assert manifest["tools"] == [
+                {
+                    "name": DIAGNOSTIC_TOOL_NAME,
+                    "description": DIAGNOSTIC_TOOL_DESCRIPTION,
+                }
+            ]
+            for member in archive.namelist():
+                content = archive.read(member)
+                assert b"seeded-test-secret" not in content
+                assert b"DIP_API_KEY" not in content

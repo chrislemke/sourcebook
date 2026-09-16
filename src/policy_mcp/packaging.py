@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Final
 
 from policy_mcp import __version__
+from policy_mcp.contracts import DIAGNOSTIC_TOOL_DESCRIPTION, DIAGNOSTIC_TOOL_NAME
 from policy_mcp.profiles import Profile
 
 PLUGIN_NAME: Final = "policy-research"
@@ -71,6 +72,8 @@ def _mcp_server(command: str, profile: Profile, *, portable: bool) -> dict[str, 
 
 def _mcpb_manifest(profile: Profile, platform: str) -> dict[str, object]:
     description = f"Local, read-only diagnostics for the {profile.value} research profile."
+    binary_name = "policy-mcp.exe" if platform == "win32" else "policy-mcp"
+    entry_point = f"server/{binary_name}"
     return {
         "manifest_version": "0.3",
         "name": profile.server_name,
@@ -80,20 +83,17 @@ def _mcpb_manifest(profile: Profile, platform: str) -> dict[str, object]:
         "author": AUTHOR,
         "server": {
             "type": "binary",
-            "entry_point": "server/policy-mcp",
+            "entry_point": entry_point,
             "mcp_config": {
-                "command": "${__dirname}/server/policy-mcp",
+                "command": f"${{__dirname}}/{entry_point}",
                 "args": ["serve", "--profile", profile.value],
                 "env": {},
             },
         },
         "tools": [
             {
-                "name": "policy_diagnostic",
-                "description": (
-                    "Check this local profile and its shared data store without reading records "
-                    "or contacting an upstream source."
-                ),
+                "name": DIAGNOSTIC_TOOL_NAME,
+                "description": DIAGNOSTIC_TOOL_DESCRIPTION,
             }
         ],
         "compatibility": {"platforms": [platform]},

@@ -65,7 +65,7 @@ SOURCEBOOK_TEST_TARGET=darwin-arm64 \
 uv run pytest tests/test_release_artifacts.py
 ```
 
-This suite initializes each profile through MCP `stdio`, lists its tools, calls `policy_diagnostic`, and compares the result across the direct executable, Claude Code plugin, OpenAI plugin, and extracted MCPB. It launches packages from read-only paths containing spaces and checks that package removal leaves the shared data directory intact.
+This suite initializes each profile through MCP `stdio`, lists its tools, calls `policy_diagnostic`, and compares the result across the direct executable, Claude Code plugin, OpenAI plugin, and extracted MCPB. It launches packages from read-only trees whose paths contain spaces, inspects every archive member for credential material, and exercises artifact install, replacement, disable, re-enable, and removal while shared data and external credential state remain intact.
 
 Validate host manifests with the host tools:
 
