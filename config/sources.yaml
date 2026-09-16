@@ -46,7 +46,8 @@ sources:
       speech_search: {state: not_configured, allowed_operations: [ep.speech.search], enable_after: [schema_pin, collection_contract_test]}
       question_search: {state: not_configured, allowed_operations: [ep.question.list], enable_after: [schema_pin, collection_contract_test]}
       committee_documents: {state: not_configured, allowed_operations: [ep.committee_document.list], enable_after: [schema_pin, collection_contract_test]}
-      actor_roles: {state: not_configured, allowed_operations: [ep.actor.roles], enable_after: [schema_pin, collection_contract_test]}
+      actor_search: {state: healthy, allowed_operations: [ep.actor.search], enable_after: [schema_pin, collection_contract_test]}
+      actor_roles: {state: healthy, allowed_operations: [ep.actor.roles], enable_after: [schema_pin, collection_contract_test]}
 
   cellar:
     adapter: CellarAdapter
@@ -89,7 +90,7 @@ sources:
     adapter: LobbyregisterAdapter
     transport: rest
     allowed_hosts: [www.lobbyregister.bundestag.de]
-    credential_transport: os_keyring_or_environment
+    credential_transport: none
     fixture_hashes: {}
     licence: {name: Lobbyregister usage terms, url: "https://www.lobbyregister.bundestag.de/"}
     attribution: Deutscher Bundestag, Lobbyregister
@@ -99,29 +100,29 @@ sources:
     supported_languages: [de]
     language_fallback: source_only
     coverage_limits: Published German federal interest-representation disclosures.
-    parser_version: "1"
+    parser_version: "2"
     routes:
-      actor_search: {state: not_configured, allowed_operations: [lobbyregister.entry.search], enable_after: [schema_pin, authentication_test, pagination_test]}
-      interests: {state: not_configured, allowed_operations: [lobbyregister.entry.get], enable_after: [schema_pin, authentication_test]}
+      actor_search: {state: healthy, allowed_operations: [lobbyregister.public_search], enable_after: [schema_pin, pagination_test]}
+      interests: {state: healthy, allowed_operations: [lobbyregister.public_search], enable_after: [schema_pin, pagination_test]}
 
   eu_whoiswho:
     adapter: EuWhoisWhoAdapter
-    transport: published_download
-    allowed_hosts: [op.europa.eu]
+    transport: sparql
+    allowed_hosts: [publications.europa.eu]
     credential_transport: none
     fixture_hashes: {}
     licence: {name: European Commission reuse policy, url: "https://commission.europa.eu/legal-notice_en"}
     attribution: Publications Office of the European Union, EU WhoisWho
     date_bases: [source_modified_at, observed_at]
-    pagination: {kind: snapshot, stable: true}
-    refresh_policy: {cadence: P1D, freshness_threshold: P3D}
+    pagination: {kind: limit, stable: false}
+    refresh_policy: {cadence: on_demand, freshness_threshold: P3D}
     supported_languages: [de, en]
     language_fallback: explicit_only
     coverage_limits: Current published organisational roles; historical coverage is not implied.
-    parser_version: "1"
+    parser_version: "2"
     routes:
-      actor_search: {state: not_configured, allowed_operations: [eu_whoiswho.snapshot], enable_after: [distribution_resolution, schema_test, freshness_test]}
-      actor_roles: {state: not_configured, allowed_operations: [eu_whoiswho.snapshot], enable_after: [distribution_resolution, schema_test, freshness_test]}
+      actor_search: {state: healthy, allowed_operations: [eu_whoiswho.person.search], enable_after: [endpoint_test, schema_test]}
+      actor_roles: {state: not_configured, allowed_operations: [eu_whoiswho.person.roles], enable_after: [role_contract_test]}
 
   eu_transparency:
     adapter: TransparencySnapshotAdapter
@@ -139,8 +140,8 @@ sources:
     coverage_limits: Self-reported current and retained snapshot disclosures only.
     parser_version: "1"
     routes:
-      actor_search: {state: not_configured, allowed_operations: [eu_transparency.snapshot], enable_after: [distribution_resolution, schema_test, freshness_test]}
-      interests: {state: not_configured, allowed_operations: [eu_transparency.snapshot], enable_after: [distribution_resolution, schema_test, freshness_test]}
+      actor_search: {state: healthy, allowed_operations: [eu_transparency.snapshot], enable_after: [distribution_resolution, schema_test, freshness_test]}
+      interests: {state: healthy, allowed_operations: [eu_transparency.snapshot], enable_after: [distribution_resolution, schema_test, freshness_test]}
 
   bundestag_open_data:
     adapter: BundestagOpenDataAdapter

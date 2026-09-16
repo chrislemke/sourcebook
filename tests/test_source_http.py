@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import gzip
 import ipaddress
+from pathlib import Path
 
 import httpx
 import pytest
@@ -88,3 +90,59 @@ async def test_retries_transient_failures_and_honors_response_limit() -> None:
         )
         with pytest.raises(SourceRequestError, match="response limit"):
             await client.get("https://files.example.eu/file")
+
+
+async def test_decoded_response_does_not_reapply_content_encoding() -> None:
+    compressed = gzip.compress(b"decoded content")
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                content=compressed,
+                headers={"content-encoding": "gzip"},
+            )
+        )
+    ) as transport:
+        client = BoundedHttpClient(
+            transport,
+            allowed_hosts={"files.example.eu"},
+            resolver=public_resolver,
+        )
+        response = await client.get("https://files.example.eu/file")
+
+    assert response.content == b"decoded content"
+    assert "content-encoding" not in response.headers
+
+
+async def test_streaming_download_replaces_cache_only_after_complete_response(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "snapshot.xml"
+    destination.write_bytes(b"old")
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, content=b"complete"))
+    ) as transport:
+        client = BoundedHttpClient(
+            transport,
+            allowed_hosts={"files.example.eu"},
+            resolver=public_resolver,
+            max_response_bytes=10,
+        )
+        response = await client.download("https://files.example.eu/file", destination)
+
+    assert response.status_code == 200
+    assert destination.read_bytes() == b"complete"
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, content=b"too-large"))
+    ) as transport:
+        client = BoundedHttpClient(
+            transport,
+            allowed_hosts={"files.example.eu"},
+            resolver=public_resolver,
+            max_response_bytes=5,
+        )
+        with pytest.raises(SourceRequestError, match="response limit"):
+            await client.download("https://files.example.eu/file", destination)
+
+    assert destination.read_bytes() == b"complete"

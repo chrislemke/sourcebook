@@ -122,11 +122,15 @@ Restart the desktop app after direct registration. The ChatGPT desktop app and C
 
 ### 3. Run your first search
 
-GovData works without an account or API key. Start a new conversation or task and ask:
+GovData and the actor sources work without an account, API key, or setup step. Start a new conversation or task and ask:
 
 > Search GovData for official datasets about the federal budget. Return the title, publisher, licence, and official link for the three best matches.
 
-Sourcebook reports sources that have not been configured as unavailable. It does not turn a missing source into an empty search result.
+Then try the actor profile:
+
+> Find Friedrich Merz in the official European Parliament and EU directory sources. Return his published identifiers, dated roles, and official links.
+
+Actor searches query the European Parliament and EU WhoisWho directly. Searches for interest representatives also use the German Lobbyregister and the EU Transparency Register. Sourcebook uses the Lobbyregister's public web search when its API requires a key, so users do not need to request or enter one. The EU Transparency Register publishes a large daily XML snapshot. Sourcebook downloads it on the first relevant search, stores it in the local Sourcebook data directory, and reuses it for 24 hours.
 
 ## Add German Bundestag procedures
 
@@ -164,7 +168,7 @@ Run a general check from the Sourcebook folder:
 
 On Windows PowerShell, run `& ".\bin\policy-mcp.exe" doctor`.
 
-Warnings about sources without credentials are normal. An `ERROR` line means the program, data folder, database, or client registration needs attention.
+A public source can occasionally be slow or unavailable. Sourcebook reports that source separately and still returns results from the other available sources. An `ERROR` line from `doctor` means the program, data folder, database, or client registration needs attention.
 
 If macOS blocks the program, run `./bin/policy-mcp --version` once. Then open **System Settings > Privacy & Security**, choose **Open Anyway** for `policy-mcp`, and rerun the command.
 
@@ -180,6 +184,8 @@ On Windows PowerShell, replace `./bin/policy-mcp` with `& ".\bin\policy-mcp.exe"
 ## What works now
 
 - GovData catalogue search works without an account or API key.
+- European Parliament and EU WhoisWho actor searches work without an account or API key.
+- German Lobbyregister and EU Transparency Register searches work without user-supplied credentials. Sourcebook uses the Bundestag's public search and caches the EU snapshot automatically.
 - German Bundestag DIP procedure search works after you add a DIP API key and run the first sync.
 - Claude Desktop, Claude Code, the ChatGPT desktop app, and Codex CLI use the same local, read-only program.
 - Sourcebook stores its index and credentials outside the installed package, so updates do not remove them.
@@ -223,6 +229,8 @@ Maintainer details are in [docs/packaging.md](docs/packaging.md) and [docs/opera
 
 ## Privacy and limits
 
-Sourcebook runs on your computer and exposes read-only research tools. It does not change public records or contact anyone. It stores a local search index, source metadata, and any documents that a configured source worker downloads.
+Sourcebook runs on your computer and exposes read-only research tools. It does not change public records or contact anyone. It stores its local index, source metadata, and downloaded public snapshots outside the installed package.
+
+Actor searches send the user's search terms to the selected official public sources. The EU Transparency Register snapshot can exceed 100 MB and may make the first matching search slower. Sourcebook retains only the public fields needed for identity, role, disclosure, provenance, and source links. It does not retain published phone numbers, email addresses, or postal addresses.
 
 GovData is catalogue discovery only. Sourcebook lists distributions but does not execute files or queries from them. DIP coverage starts with the time windows you sync, so it is not automatically a complete historical archive. Other planned source routes remain unavailable until their contracts and live-data checks pass.

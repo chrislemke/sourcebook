@@ -5,7 +5,7 @@ from __future__ import annotations
 from mcp.server.mcpserver import MCPServer
 
 from policy_mcp import __version__
-from policy_mcp.actors import FrozenActorCatalog, register_actor_tools
+from policy_mcp.actors import FrozenActorCatalog, LiveActorCatalog, register_actor_tools
 from policy_mcp.adapters.govdata import LiveGovDataService
 from policy_mcp.evidence import FrozenEvidenceCatalog, register_evidence_tools
 from policy_mcp.legislation import FrozenLegislationCatalog, register_legislation_tools
@@ -19,6 +19,7 @@ def create_server(
     *,
     principal: str = "local-installation",
     legislation_catalog: FrozenLegislationCatalog | None = None,
+    actor_catalog: FrozenActorCatalog | None = None,
 ) -> MCPServer[None]:
     """Build the server for one deployment profile."""
     selected = Profile(profile)
@@ -40,7 +41,7 @@ def create_server(
     if selected == Profile.ACTORS:
         register_actor_tools(
             server,
-            FrozenActorCatalog.empty(),
+            actor_catalog or LiveActorCatalog(),
             SQLiteReferenceStore(principal=principal),
         )
         return server

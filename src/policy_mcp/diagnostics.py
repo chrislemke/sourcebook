@@ -22,7 +22,6 @@ from policy_mcp.storage import data_directory, database_health, open_database
 
 CredentialName = Literal[
     "DIP_API_KEY",
-    "LOBBYREGISTER_API_KEY",
     "GENESIS_TOKEN",
     "EURLEX_USERNAME",
     "EURLEX_PASSWORD",
@@ -30,7 +29,6 @@ CredentialName = Literal[
 ClientName = Literal["claude-desktop", "claude-code", "chatgpt-desktop", "codex-cli"]
 CREDENTIAL_NAMES: tuple[CredentialName, ...] = (
     "DIP_API_KEY",
-    "LOBBYREGISTER_API_KEY",
     "GENESIS_TOKEN",
     "EURLEX_USERNAME",
     "EURLEX_PASSWORD",

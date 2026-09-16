@@ -213,7 +213,13 @@ async def test_actor_profile_exposes_stable_research_contract(
     assert isinstance(result, CallToolResult)
     assert result.structured_content is not None
     assert result.structured_content["status"] == "ok"
-    assert {item["state"] for item in result.structured_content["sources"]} == {"not_configured"}
+    assert {item["source"] for item in result.structured_content["sources"]} == {
+        "ep",
+        "eu_transparency",
+        "eu_whoiswho",
+        "lobbyregister",
+    }
+    assert {item["state"] for item in result.structured_content["sources"]} == {"ready"}
 
 
 async def test_evidence_profile_exposes_stable_research_contract(

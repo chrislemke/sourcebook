@@ -1,6 +1,6 @@
 # Operations
 
-Sourcebook starts from a failed-closed source registry. Research tools remain available so hosts can learn their stable contracts, but capability calls distinguish `not_configured`, `disabled`, `warming`, `schema_changed`, and `temporarily_unavailable` routes. An empty result never substitutes for one of those states. GovData catalogue search is available interactively without credentials. DIP has a bounded sync worker and becomes searchable after a successful credentialed sync. Changing registry state alone does not activate any other route.
+Sourcebook starts from a failed-closed source registry. Research tools remain available so hosts can learn their stable contracts, but capability calls distinguish `not_configured`, `disabled`, `warming`, `schema_changed`, and `temporarily_unavailable` routes. An empty result never substitutes for one of those states. GovData catalogue search and the four actor sources (European Parliament, EU WhoisWho, Bundestag Lobbyregister, and EU Transparency Register) work interactively without user credentials. DIP has a bounded sync worker and becomes searchable after a successful credentialed sync. Changing registry state alone does not activate any other route.
 
 ## Preflight
 
@@ -19,11 +19,11 @@ uv run pytest
 
 ## Credentials
 
-Store secrets with `policy-mcp configure --credential NAME`. The command writes through the operating-system credential store. Never put secrets in MCP arguments, registry files, URLs, fixture files, logs, or evaluation decisions. Rotate a credential by running the same command again, then run the source's low-volume authentication check before changing its registry state.
+Store secrets with `policy-mcp configure --credential NAME`. The command writes through the operating-system credential store. Never put secrets in MCP arguments, registry files, URLs, fixture files, logs, or evaluation decisions. Rotate a credential by running the same command again, then run the source's low-volume authentication check before changing its registry state. Actor searches need no credential setup; when the Lobbyregister API requires a key, the adapter uses the Bundestag's public web search instead.
 
 ## Sync and backfill
 
-Use `policy-mcp sync --source dip` for an incremental DIP run and `policy-mcp backfill --source dip --from-date YYYY-MM-DD --to-date YYYY-MM-DD` for a bounded historical window. Store `DIP_API_KEY` first. Sources without a bound worker stop with `not_configured`; no MCP request starts a background crawl. DIP watermarks advance only after an entire window persists, and only one ingestion writer may run at a time.
+Use `policy-mcp sync --source dip` for an incremental DIP run and `policy-mcp backfill --source dip --from-date YYYY-MM-DD --to-date YYYY-MM-DD` for a bounded historical window. Store `DIP_API_KEY` first. Sources without a bound worker stop with `not_configured`; no MCP request starts a background crawl. Actor sources are queried on demand. The EU Transparency Register snapshot is cached locally for 24 hours. DIP watermarks advance only after an entire window persists, and only one ingestion writer may run at a time.
 
 ## Backup and restore
 

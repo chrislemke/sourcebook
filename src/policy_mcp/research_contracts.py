@@ -36,6 +36,7 @@ class ResearchError(StrictModel):
         "expired_cursor",
         "not_found",
         "oversized",
+        "temporarily_unavailable",
     ]
     message: str
     retryable: bool = False

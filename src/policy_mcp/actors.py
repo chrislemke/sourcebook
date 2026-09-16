@@ -13,6 +13,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 from pydantic import Field, model_validator
 
+from policy_mcp.adapters.actors import ActorProviderError, LiveActorSources
 from policy_mcp.contracts import tool_description
 from policy_mcp.references import (
     MAX_SNAPSHOT_ITEMS,
@@ -296,9 +297,186 @@ class FrozenActorCatalog:
     def actors(self) -> Iterable[_Actor]:
         return self._actors.values()
 
+    async def prepare_search(self, request: ActorSearchInput) -> list[ResearchWarning]:
+        """Frozen catalogs already contain every actor they can search."""
+        del request
+        return []
+
+    async def prepare_interests(self, request: ActorInterestsInput) -> list[ResearchWarning]:
+        """Frozen catalogs already contain every disclosure they can search."""
+        del request
+        return []
+
     @property
     def ready_sources(self) -> set[str]:
         return {actor.source for actor in self._actors.values()}
+
+    @property
+    def open_world(self) -> bool:
+        return False
+
+    def coverage_limitations(self, actor: _Actor) -> list[str]:
+        del actor
+        return ["The frozen acceptance catalog is not a complete register."]
+
+    def capabilities(self) -> list[ActorSourceCapability]:
+        return [
+            ActorSourceCapability(
+                source="ep_acceptance",
+                scope=Jurisdiction.EU,
+                state=("ready" if "ep_acceptance" in self.ready_sources else "not_configured"),
+                operations=(
+                    ["search", "get_roles"] if "ep_acceptance" in self.ready_sources else []
+                ),
+                limitations=["Frozen acceptance data only."],
+            ),
+            ActorSourceCapability(
+                source="whoiswho_acceptance",
+                scope=Jurisdiction.EU,
+                state=(
+                    "ready" if "whoiswho_acceptance" in self.ready_sources else "not_configured"
+                ),
+                operations=(
+                    ["search", "get_roles", "get_relationships"]
+                    if "whoiswho_acceptance" in self.ready_sources
+                    else []
+                ),
+                limitations=["Frozen acceptance data only."],
+            ),
+            ActorSourceCapability(
+                source="register_acceptance",
+                scope=Jurisdiction.DE,
+                state=(
+                    "ready" if "register_acceptance" in self.ready_sources else "not_configured"
+                ),
+                operations=(
+                    ["search", "get_disclosures", "interests"]
+                    if "register_acceptance" in self.ready_sources
+                    else []
+                ),
+                limitations=["Frozen acceptance data only."],
+            ),
+            ActorSourceCapability(
+                source="lobbyregister",
+                scope=Jurisdiction.DE,
+                state="not_configured",
+                operations=[],
+                limitations=["The official v2 schema contract gate has not passed."],
+            ),
+            ActorSourceCapability(
+                source="eu_transparency",
+                scope=Jurisdiction.EU,
+                state="not_configured",
+                operations=[],
+                limitations=["No validated current distribution is configured."],
+            ),
+        ]
+
+
+class LiveActorCatalog(FrozenActorCatalog):
+    """In-memory catalog populated on demand from public official sources."""
+
+    def __init__(self, sources: LiveActorSources | None = None) -> None:
+        super().__init__(_Fixture(retrieved_at="", indexed_at="", actors=[]))
+        self._sources = sources or LiveActorSources()
+        self._prepared_keys: list[str] = []
+
+    @property
+    def ready_sources(self) -> set[str]:
+        return set(self._sources.ready_sources)
+
+    @property
+    def open_world(self) -> bool:
+        return True
+
+    def coverage_limitations(self, actor: _Actor) -> list[str]:
+        limitations = {
+            "ep": ["European Parliament member and body data only."],
+            "eu_whoiswho": ["Current published EU directory identities only."],
+            "lobbyregister": ["Published German federal lobbying disclosures only."],
+            "eu_transparency": ["Self-reported EU Transparency Register snapshot data."],
+        }
+        return limitations.get(actor.source, ["Coverage follows the official source."])
+
+    async def prepare_search(self, request: ActorSearchInput) -> list[ResearchWarning]:
+        result = await self._sources.search(
+            request.query,
+            scope=request.scope.value,
+            kind=request.kind,
+            source=request.source,
+            language=request.language,
+            limit=request.limit,
+        )
+        if not result.successful_sources:
+            raise ActorProviderError("No selected official actor source was reachable")
+        self._prepared_keys = []
+        for record in result.records:
+            actor = _Actor.model_validate(record.model_dump(mode="python"))
+            self._actors[actor.key] = actor
+            self._prepared_keys.append(actor.key)
+        self.retrieved_at = result.retrieved_at
+        self.indexed_at = result.retrieved_at
+        return [
+            ResearchWarning(
+                code="source_unavailable",
+                message=f"{source} was unavailable; other configured sources were still searched.",
+            )
+            for source in sorted(result.failures)
+        ]
+
+    def search(self, request: ActorSearchInput) -> list[_Actor]:
+        """Return the bounded matches selected by the live providers."""
+        return [
+            actor
+            for key in self._prepared_keys
+            if (actor := self._actors.get(key)) is not None
+            and (request.updated_since is None or actor.source_modified_at >= request.updated_since)
+        ]
+
+    async def prepare_interests(self, request: ActorInterestsInput) -> list[ResearchWarning]:
+        if request.query is None:
+            return []
+        return await self.prepare_search(
+            ActorSearchInput(
+                query=request.query,
+                scope=request.scope,
+                kind="interest_representative",
+                updated_since=request.updated_since,
+                limit=request.limit,
+            )
+        )
+
+    def capabilities(self) -> list[ActorSourceCapability]:
+        return [
+            ActorSourceCapability(
+                source="ep",
+                scope=Jurisdiction.EU,
+                state="ready",
+                operations=["search", "get_roles"],
+                limitations=["Official European Parliament member and body data."],
+            ),
+            ActorSourceCapability(
+                source="eu_whoiswho",
+                scope=Jurisdiction.EU,
+                state="ready",
+                operations=["search"],
+                limitations=["Current official EU directory identities."],
+            ),
+            ActorSourceCapability(
+                source="lobbyregister",
+                scope=Jurisdiction.DE,
+                state="ready",
+                operations=["search", "get_disclosures", "interests"],
+                limitations=["Uses the public Bundestag search and, when available, its API."],
+            ),
+            ActorSourceCapability(
+                source="eu_transparency",
+                scope=Jurisdiction.EU,
+                state="ready",
+                operations=["search", "get_disclosures", "interests"],
+                limitations=["The daily public snapshot is cached locally for 24 hours."],
+            ),
+        ]
 
 
 def _query_hash(value: StrictModel) -> str:
@@ -317,8 +495,8 @@ def _provenance(catalog: FrozenActorCatalog, actor: _Actor, provider_id: str) ->
     )
 
 
-def _coverage(actor: _Actor, *, historical: bool = False) -> Coverage:
-    limitations = ["The frozen acceptance catalog is not a complete register."]
+def _coverage(catalog: FrozenActorCatalog, actor: _Actor, *, historical: bool = False) -> Coverage:
+    limitations = catalog.coverage_limitations(actor)
     if historical:
         limitations.append("This source does not support the requested historical state.")
     return Coverage(
@@ -415,7 +593,7 @@ def register_actor_tools(
         read_only_hint=True,
         destructive_hint=False,
         idempotent_hint=True,
-        open_world_hint=False,
+        open_world_hint=catalog.open_world,
     )
 
     @server.tool(
@@ -424,7 +602,7 @@ def register_actor_tools(
         annotations=annotations,
         structured_output=True,
     )
-    def actor_search(
+    async def actor_search(
         query: Annotated[str, Field(min_length=1, max_length=300)],
         scope: ActorScope,
         kind: ActorKind,
@@ -459,6 +637,17 @@ def register_actor_tools(
                 error=_error(
                     "unsupported",
                     "The frozen actor sources do not support historical as-of search.",
+                ),
+            )
+        try:
+            source_warnings = await catalog.prepare_search(request)
+        except ActorProviderError:
+            return ActorSearchResponse(
+                status=ResearchStatus.ERROR,
+                error=_error(
+                    "temporarily_unavailable",
+                    "The selected official actor sources could not be reached.",
+                    retryable=True,
                 ),
             )
         digest = _query_hash(request)
@@ -500,11 +689,14 @@ def register_actor_tools(
         actors = [actor for key in page.keys if (actor := catalog.actor(key)) is not None]
         cards = [_card(catalog, reference_store, actor) for actor in actors]
         response = ActorSearchResponse(
-            status=ResearchStatus.OK,
+            status=ResearchStatus.PARTIAL if source_warnings else ResearchStatus.OK,
             items=cards,
             continuation=_continuation(page),
-            warnings=[warning for actor in actors for warning in _warning_for(actor)],
-            coverage=[_coverage(actor) for actor in actors],
+            warnings=[
+                *source_warnings,
+                *(warning for actor in actors for warning in _warning_for(actor)),
+            ],
+            coverage=[_coverage(catalog, actor) for actor in actors],
             freshness=[_freshness(catalog, actor) for actor in actors],
             provenance=[card.provenance for card in cards],
         )
@@ -558,7 +750,7 @@ def register_actor_tools(
                     "unsupported",
                     "This source cannot answer the requested historical as-of date.",
                 ),
-                coverage=[_coverage(actor, historical=True)],
+                coverage=[_coverage(catalog, actor, historical=True)],
                 freshness=[_freshness(catalog, actor)],
             )
         view_items = _view_items(actor, request)
@@ -617,7 +809,7 @@ def register_actor_tools(
             actor=detail,
             continuation=_continuation(page) if page is not None else None,
             warnings=_warning_for(actor),
-            coverage=[_coverage(actor)],
+            coverage=[_coverage(catalog, actor)],
             freshness=[_freshness(catalog, actor)],
             provenance=detail.evidence or [_provenance(catalog, actor, actor.provider_id)],
         )
@@ -635,7 +827,7 @@ def register_actor_tools(
         annotations=annotations,
         structured_output=True,
     )
-    def actor_interests(
+    async def actor_interests(
         scope: ActorScope,
         query: Annotated[str | None, Field(min_length=1, max_length=300)] = None,
         procedure_reference: Annotated[str | None, Field(min_length=12, max_length=200)] = None,
@@ -653,6 +845,17 @@ def register_actor_tools(
             limit=limit,
             cursor=cursor,
         )
+        try:
+            source_warnings = await catalog.prepare_interests(request)
+        except ActorProviderError:
+            return ActorInterestsResponse(
+                status=ResearchStatus.ERROR,
+                error=_error(
+                    "temporarily_unavailable",
+                    "The selected official actor sources could not be reached.",
+                    retryable=True,
+                ),
+            )
         try:
             actor_key = (
                 reference_store.resolve(
@@ -723,11 +926,14 @@ def register_actor_tools(
             is not None
         ]
         response = ActorInterestsResponse(
-            status=ResearchStatus.OK,
+            status=ResearchStatus.PARTIAL if source_warnings else ResearchStatus.OK,
             matches=selected,
             continuation=_continuation(page),
-            warnings=[warning for actor in selected_actors for warning in _warning_for(actor)],
-            coverage=[_coverage(actor) for actor in selected_actors],
+            warnings=[
+                *source_warnings,
+                *(warning for actor in selected_actors for warning in _warning_for(actor)),
+            ],
+            coverage=[_coverage(catalog, actor) for actor in selected_actors],
             freshness=[_freshness(catalog, actor) for actor in selected_actors],
             provenance=[item.provenance for item in selected],
         )
@@ -744,57 +950,7 @@ def register_actor_tools(
         source: Annotated[str | None, Field(min_length=1, max_length=50)] = None,
     ) -> ActorCapabilitiesResponse:
         request = ActorCapabilitiesInput(scope=scope, source=source)
-        sources = [
-            ActorSourceCapability(
-                source="ep_acceptance",
-                scope=Jurisdiction.EU,
-                state=("ready" if "ep_acceptance" in catalog.ready_sources else "not_configured"),
-                operations=(
-                    ["search", "get_roles"] if "ep_acceptance" in catalog.ready_sources else []
-                ),
-                limitations=["Frozen acceptance data only."],
-            ),
-            ActorSourceCapability(
-                source="whoiswho_acceptance",
-                scope=Jurisdiction.EU,
-                state=(
-                    "ready" if "whoiswho_acceptance" in catalog.ready_sources else "not_configured"
-                ),
-                operations=(
-                    ["search", "get_roles", "get_relationships"]
-                    if "whoiswho_acceptance" in catalog.ready_sources
-                    else []
-                ),
-                limitations=["Frozen acceptance data only."],
-            ),
-            ActorSourceCapability(
-                source="register_acceptance",
-                scope=Jurisdiction.DE,
-                state=(
-                    "ready" if "register_acceptance" in catalog.ready_sources else "not_configured"
-                ),
-                operations=(
-                    ["search", "get_disclosures", "interests"]
-                    if "register_acceptance" in catalog.ready_sources
-                    else []
-                ),
-                limitations=["Frozen acceptance data only."],
-            ),
-            ActorSourceCapability(
-                source="lobbyregister",
-                scope=Jurisdiction.DE,
-                state="not_configured",
-                operations=[],
-                limitations=["The official v2 schema contract gate has not passed."],
-            ),
-            ActorSourceCapability(
-                source="eu_transparency",
-                scope=Jurisdiction.EU,
-                state="not_configured",
-                operations=[],
-                limitations=["No validated current distribution is configured."],
-            ),
-        ]
+        sources = catalog.capabilities()
         filtered = [
             item
             for item in sources
@@ -810,7 +966,7 @@ def register_actor_tools(
         response = ActorCapabilitiesResponse(
             status=ResearchStatus.OK,
             sources=filtered,
-            coverage=[_coverage(actor) for actor in fixture_actors],
+            coverage=[_coverage(catalog, actor) for actor in fixture_actors],
             freshness=[_freshness(catalog, actor) for actor in fixture_actors],
         )
         return fit_response(response, response.sources)

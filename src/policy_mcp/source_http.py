@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import os
+import secrets
 import socket
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -122,7 +125,12 @@ class BoundedHttpClient:
                             )
                     return httpx.Response(
                         status_code=response.status_code,
-                        headers=response.headers,
+                        headers={
+                            key: value
+                            for key, value in response.headers.items()
+                            if key.lower()
+                            not in {"content-encoding", "content-length", "transfer-encoding"}
+                        },
                         content=bytes(content),
                         request=response.request,
                         extensions=response.extensions,
@@ -153,3 +161,76 @@ class BoundedHttpClient:
     ) -> httpx.Response:
         """Submit one bounded form request."""
         return await self.request("POST", url, headers=headers, data=data)
+
+    async def download(self, url: str, destination: Path) -> httpx.Response:
+        """Stream one bounded official download into an atomically replaced file."""
+        current = url
+        redirects = 0
+        attempts = 0
+        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        while True:
+            self._validate_url(current)
+            staging = destination.with_name(
+                f".{destination.name}.{os.getpid()}.{secrets.token_hex(8)}"
+            )
+            try:
+                async with self.client.stream("GET", current, follow_redirects=False) as response:
+                    if response.status_code in {301, 302, 303, 307, 308}:
+                        location = response.headers.get("location")
+                        if location is None:
+                            raise SourceRequestError("Source redirect omitted its destination")
+                        redirects += 1
+                        if redirects > self.max_redirects:
+                            raise SourceRequestError("Source exceeded the redirect limit")
+                        current = urljoin(current, location)
+                        continue
+                    if (
+                        response.status_code in {429, 502, 503, 504}
+                        and attempts < self.transient_retries
+                    ):
+                        attempts += 1
+                        retry_after = response.headers.get("retry-after", "0")
+                        try:
+                            delay = min(max(float(retry_after), 0), 5)
+                        except ValueError:
+                            delay = 0
+                        await self.sleep(delay)
+                        continue
+                    response.raise_for_status()
+                    descriptor = os.open(staging, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                    written = 0
+                    try:
+                        async for chunk in response.aiter_bytes():
+                            written += len(chunk)
+                            if written > self.max_response_bytes:
+                                raise SourceRequestError(
+                                    "Official source response exceeded the response limit"
+                                )
+                            view = memoryview(chunk)
+                            while view:
+                                count = os.write(descriptor, view)
+                                if count == 0:
+                                    raise OSError("Source download write made no progress")
+                                view = view[count:]
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                    os.replace(staging, destination)
+                    return httpx.Response(
+                        status_code=response.status_code,
+                        headers={
+                            key: value
+                            for key, value in response.headers.items()
+                            if key.lower()
+                            not in {"content-encoding", "content-length", "transfer-encoding"}
+                        },
+                        request=response.request,
+                        extensions=response.extensions,
+                    )
+            except httpx.HTTPError as error:
+                if attempts >= self.transient_retries:
+                    raise SourceRequestError("Official source request failed") from error
+                attempts += 1
+                await self.sleep(0)
+            finally:
+                staging.unlink(missing_ok=True)
