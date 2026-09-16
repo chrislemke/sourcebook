@@ -51,7 +51,7 @@ On macOS, run these commands from the Sourcebook folder:
 
 ```bash
 claude plugin marketplace add "$PWD/marketplaces/claude" --scope user
-claude plugin install policy-research@policy-tools --scope user
+claude plugin install policy-research@policy-tools --scope user --config dip_api_key=YOUR_DIP_KEY
 ./bin/policy-mcp doctor --client claude-code
 ```
 
@@ -59,11 +59,13 @@ On Windows PowerShell, run:
 
 ```powershell
 claude plugin marketplace add "$((Resolve-Path '.\marketplaces\claude').Path)" --scope user
-claude plugin install policy-research@policy-tools --scope user
+claude plugin install policy-research@policy-tools --scope user --config dip_api_key=YOUR_DIP_KEY
 & ".\bin\policy-mcp.exe" doctor --client claude-code
 ```
 
 `policy-research@policy-tools` is the complete plugin ID. `policy-tools` is Sourcebook's marketplace name, not a value you need to replace.
+
+Replace `YOUR_DIP_KEY` with your [DIP API key](#get-a-dip-api-key). The key enables German Bundestag search. Claude Code stores it in the macOS Keychain or in its credentials file, not in `settings.json`. If you install the plugin from the `/plugin` menu instead, Claude Code asks for the key when you enable the plugin. To skip the key, leave out `--config dip_api_key=YOUR_DIP_KEY`; everything except German legislation search still works.
 
 Start a new Claude Code session. Run `/plugin`, open **Installed**, and confirm that `policy-research` is enabled. See the [Claude Code plugin guide](https://code.claude.com/docs/en/discover-plugins) if the plugin commands are unavailable.
 
@@ -76,7 +78,8 @@ Claude Desktop uses three extension files:
 3. Under **Extension Developer**, choose **Install Extension...**.
 4. Open the `claude-desktop` folder inside your Sourcebook folder.
 5. Install the three files whose names begin with `policy-legislation`, `policy-actors`, and `policy-evidence`.
-6. Start a new conversation. If the tools do not appear, quit and reopen Claude Desktop.
+6. When Claude Desktop installs `policy-legislation`, it asks for a **DIP API key (German Bundestag)**. Paste your [DIP API key](#get-a-dip-api-key). Claude Desktop stores it securely. You can leave the field empty and add the key later in **Settings > Extensions > Sourcebook Legislation**.
+7. Start a new conversation. If the tools do not appear, quit and reopen Claude Desktop.
 
 Anthropic's [Claude Desktop extension guide](https://support.claude.com/en/articles/10949351-getting-started-with-local-mcp-servers-on-claude-desktop) has screenshots of the same flow.
 
@@ -134,29 +137,54 @@ Actor searches query the European Parliament and EU WhoisWho directly. Searches 
 
 ## Add German Bundestag procedures
 
-German Bundestag DIP procedure search needs a free DIP API key and a first sync. Get a key from the [Bundestag DIP API page](https://dip.bundestag.de/%C3%BCber-dip/hilfe/api).
+German legislation search queries the Bundestag's official DIP database live. DIP accepts requests only with an API key. The key is free.
 
-On macOS, open Terminal in the Sourcebook folder and run:
+### Get a DIP API key
 
-```bash
-./bin/policy-mcp configure --credential DIP_API_KEY
-./bin/policy-mcp sync --source dip
-```
+You have two options:
 
-On Windows PowerShell, run:
+- **Public key.** The official [DIP API help page](https://dip.bundestag.de/%C3%BCber-dip/hilfe/api) publishes a key that anyone may use without registering. The key published there in September 2026 is valid until the end of May 2027. The Bundestag then replaces it, so copy the new key from the same page when the old one stops working. The community project [bundesAPI/dip-bundestag-api](https://github.com/bundesAPI/dip-bundestag-api) on GitHub also lists the public key, but it can lag behind the official page.
+- **Personal key.** Send an e-mail to parlamentsdokumentation@bundestag.de with your name and e-mail address, plus your organisation if you have one. A personal key is initially valid for ten years and works the same as the public key. The [DIP terms of use](https://dip.bundestag.de/documents/nutzungsbedingungen_dip.pdf) apply to both.
 
-```powershell
-& ".\bin\policy-mcp.exe" configure --credential DIP_API_KEY
-& ".\bin\policy-mcp.exe" sync --source dip
-```
+### Enter the key
 
-Sourcebook asks for the key in a hidden prompt and stores it in your operating system's credential store. It does not write the key to the MCP configuration.
+- **Claude Desktop:** enter the key in the dialog that appears when you install `policy-legislation`. To add or change it later, open **Settings > Extensions > Sourcebook Legislation**.
+- **Claude Code:** pass `--config dip_api_key=YOUR_DIP_KEY` to `claude plugin install`, as shown in [Connect your app](#claude-code). Claude Code also asks for the key when you enable the plugin from the `/plugin` menu.
+- **Codex CLI, the ChatGPT desktop app, or any client:** store the key in your operating system's credential store. Sourcebook asks for it in a hidden prompt and never writes it to a configuration file.
 
-The first sync covers changes from the previous day. Sourcebook does not schedule updates, so run `sync` again when you need newer records. Restart the connected app after a sync so it opens the updated local index. See [docs/operations.md](docs/operations.md) for bounded historical backfills.
+  On macOS, run this from the Sourcebook folder:
 
-Then try:
+  ```bash
+  ./bin/policy-mcp configure --credential DIP_API_KEY
+  ```
 
-> Search the locally synchronized German federal legislative procedures for a topic that changed recently. Show the recorded status, timeline, and official source links.
+  On Windows PowerShell, run:
+
+  ```powershell
+  & ".\bin\policy-mcp.exe" configure --credential DIP_API_KEY
+  ```
+
+A key entered in Claude Desktop or the Claude Code plugin takes precedence over the credential store. Restart the app or start a new session after you add or change the key. Run `./bin/policy-mcp doctor` to confirm that the `dip_api_key` line reads `OK`.
+
+Then ask:
+
+> Search the German Bundestag procedures for the Tariftreuegesetz. Show its status, parliamentary steps, and the official DIP link.
+
+Live search matches words in procedure titles, so distinctive words such as *Tariftreue* work better than general words such as *Gesetz*. An optional local index adds abstracts and subject terms; [docs/operations.md](docs/operations.md) describes `sync` and `backfill`.
+
+## API keys for each source
+
+Only German legislation search needs a key today. The table lists every source Sourcebook connects to or plans to connect to, and where to find public keys or request your own.
+
+| Source | Used for | Key needed | Public key | Personal key or account |
+|---|---|---|---|---|
+| Bundestag DIP | German legislation search | Yes, `DIP_API_KEY` | [Official DIP API page](https://dip.bundestag.de/%C3%BCber-dip/hilfe/api), valid until the end of May 2027; also listed on GitHub at [bundesAPI/dip-bundestag-api](https://github.com/bundesAPI/dip-bundestag-api) | E-mail parlamentsdokumentation@bundestag.de |
+| Bundestag Lobbyregister | Lobbying search | No. Sourcebook uses the register's public search | The register's REST API needs a key, published on the [official Lobbyregister open data page](https://www.lobbyregister.bundestag.de/informationen-und-hilfe/open-data-1049716). API reference: [Swagger UI](https://api.lobbyregister.bundestag.de/rest/v2/swagger-ui/). GitHub: [bundesAPI/bundestag-lobbyregister-api](https://github.com/bundesAPI/bundestag-lobbyregister-api) documents only the older keyless endpoints | E-mail lobbyregister@bundestag.de for a permanent personal key |
+| Destatis GENESIS-Online | Planned statistics tables; not connected yet (`GENESIS_TOKEN`) | Yes | None. The [official API guide](https://genesis.destatis.de/datenbank/online/docs/GENESIS-Webservices_Einfuehrung.pdf) requires a login or token. GitHub: [bundesAPI/destatis-api](https://github.com/bundesAPI/destatis-api) | Register free of charge on [GENESIS-Online](https://genesis.destatis.de/datenbank/online), then copy your token from the **Webservice-Schnittstelle (API)** dialog. See the [Destatis API overview](https://www.destatis.de/DE/Service/OpenData/genesis-api-webservice-oberflaeche.html) |
+| EUR-Lex web service | Planned EU full-text search; not connected yet (`EURLEX_USERNAME`, `EURLEX_PASSWORD`) | Yes | None | Free after registration, as described on the [EUR-Lex web service page](https://eur-lex.europa.eu/content/help/data-reuse/webservice.html) |
+| GovData, European Parliament, EU WhoisWho, EU Transparency Register | Datasets, MEPs, EU officials, EU lobbying | No | Not needed | Not needed |
+
+Public keys are shared by everyone who uses them, so the provider can replace them at short notice. Use a personal key if you rely on a source every day.
 
 ## Troubleshooting
 
@@ -169,6 +197,8 @@ Run a general check from the Sourcebook folder:
 On Windows PowerShell, run `& ".\bin\policy-mcp.exe" doctor`.
 
 A public source can occasionally be slow or unavailable. Sourcebook reports that source separately and still returns results from the other available sources. An `ERROR` line from `doctor` means the program, data folder, database, or client registration needs attention.
+
+If every public source reports `temporarily_unavailable`, check whether a firewall such as Little Snitch blocks `policy-mcp`. Each release is a new unsigned program, so firewall rules for an earlier version may not apply.
 
 If macOS blocks the program, run `./bin/policy-mcp --version` once. Then open **System Settings > Privacy & Security**, choose **Open Anyway** for `policy-mcp`, and rerun the command.
 
@@ -186,7 +216,7 @@ On Windows PowerShell, replace `./bin/policy-mcp` with `& ".\bin\policy-mcp.exe"
 - GovData catalogue search works without an account or API key.
 - European Parliament and EU WhoisWho actor searches work without an account or API key.
 - German Lobbyregister and EU Transparency Register searches work without user-supplied credentials. Sourcebook uses the Bundestag's public search and caches the EU snapshot automatically.
-- German Bundestag DIP procedure search works after you add a DIP API key and run the first sync.
+- German Bundestag procedure search queries DIP live after you add a free DIP API key.
 - Claude Desktop, Claude Code, the ChatGPT desktop app, and Codex CLI use the same local, read-only program.
 - Sourcebook stores its index and credentials outside the installed package, so updates do not remove them.
 
@@ -233,4 +263,4 @@ Sourcebook runs on your computer and exposes read-only research tools. It does n
 
 Actor searches send the user's search terms to the selected official public sources. The EU Transparency Register snapshot can exceed 100 MB and may make the first matching search slower. Sourcebook retains only the public fields needed for identity, role, disclosure, provenance, and source links. It does not retain published phone numbers, email addresses, or postal addresses.
 
-GovData is catalogue discovery only. Sourcebook lists distributions but does not execute files or queries from them. DIP coverage starts with the time windows you sync, so it is not automatically a complete historical archive. Other planned source routes remain unavailable until their contracts and live-data checks pass.
+GovData is catalogue discovery only. Sourcebook lists distributions but does not execute files or queries from them. German legislation searches send your search words and your DIP API key to the Bundestag's DIP API. Other planned source routes remain unavailable until their contracts and live-data checks pass.

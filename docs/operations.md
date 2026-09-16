@@ -1,6 +1,6 @@
 # Operations
 
-Sourcebook starts from a failed-closed source registry. Research tools remain available so hosts can learn their stable contracts, but capability calls distinguish `not_configured`, `disabled`, `warming`, `schema_changed`, and `temporarily_unavailable` routes. An empty result never substitutes for one of those states. GovData catalogue search and the four actor sources (European Parliament, EU WhoisWho, Bundestag Lobbyregister, and EU Transparency Register) work interactively without user credentials. DIP has a bounded sync worker and becomes searchable after a successful credentialed sync. Changing registry state alone does not activate any other route.
+Sourcebook starts from a failed-closed source registry. Research tools remain available so hosts can learn their stable contracts, but capability calls distinguish `not_configured`, `disabled`, `warming`, `schema_changed`, and `temporarily_unavailable` routes. An empty result never substitutes for one of those states. GovData catalogue search and the four actor sources (European Parliament, EU WhoisWho, Bundestag Lobbyregister, and EU Transparency Register) work interactively without user credentials. With a DIP API key, `legislation_search` and `legislation_procedure` query DIP live. The key comes from the `DIP_API_KEY` environment variable, which Claude Desktop and the Claude Code plugin set from the key entered at installation, or from the OS credential store. Without a key, DIP search uses a local index that the bounded sync worker fills. Changing registry state alone does not activate any other route.
 
 ## Preflight
 
@@ -23,7 +23,7 @@ Store secrets with `policy-mcp configure --credential NAME`. The command writes 
 
 ## Sync and backfill
 
-Use `policy-mcp sync --source dip` for an incremental DIP run and `policy-mcp backfill --source dip --from-date YYYY-MM-DD --to-date YYYY-MM-DD` for a bounded historical window. Store `DIP_API_KEY` first. Sources without a bound worker stop with `not_configured`; no MCP request starts a background crawl. Actor sources are queried on demand. The EU Transparency Register snapshot is cached locally for 24 hours. DIP watermarks advance only after an entire window persists, and only one ingestion writer may run at a time.
+Use `policy-mcp sync --source dip` for an incremental DIP run and `policy-mcp backfill --source dip --from-date YYYY-MM-DD --to-date YYYY-MM-DD` for a bounded historical window. Store `DIP_API_KEY` first. Sources without a bound worker stop with `not_configured`; no MCP request starts a background crawl. Actor sources are queried on demand. The EU Transparency Register snapshot is cached locally for 24 hours. DIP runs split a range into windows of at most six hours and halve a window until it holds no more than 250 changed procedures. Each window persists before its watermark advances, so an interrupted run resumes after the last completed window. Only one ingestion writer may run at a time. The DIP client sends at most one request per second, because DIP's bot protection challenges faster clients. A sync therefore takes about one second per changed procedure. If DIP still answers with a challenge, the run stops with a bot-protection message; wait several minutes before retrying.
 
 ## Backup and restore
 
